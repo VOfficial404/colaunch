@@ -122,6 +122,9 @@ func GetStatus(ctx context.Context, sh *colab.Shell) (*Status, error) {
 // RunPlugin uploads a plugin's script and runs it in the background.
 func RunPlugin(ctx context.Context, sh *colab.Shell, id, script string) error {
 	path := fmt.Sprintf("%s/plugins/%s/run.sh", Home, id)
+	// Scripts written on Windows end their lines with CRLF, which bash
+	// takes for part of each command.
+	script = strings.ReplaceAll(script, "\r\n", "\n")
 	if err := sh.Upload(ctx, path, []byte(script)); err != nil {
 		return err
 	}
