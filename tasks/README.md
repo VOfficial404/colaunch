@@ -2,6 +2,8 @@
 
 [English](#english) · [简体中文](#简体中文)
 
+For GGUF image or video models, the built-in ComfyUI task sets up the model and workflow for you. · 生图或生视频 GGUF 用内置 ComfyUI 任务更方便，它会配好模型和工作流。[ComfyUI guide · 使用指南](../docs/comfyui.md)
+
 ## English
 
 This folder is Colaunch's community library: **Tasks → Community tasks**

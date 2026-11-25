@@ -27,11 +27,11 @@ func TestQuantOf(t *testing.T) {
 // Split parts add up into one quantization, and projectors stay out.
 func TestQuantsGroupsParts(t *testing.T) {
 	qs := Quants([]File{
-		{"Q8_0/m-Q8_0-00001-of-00002.gguf", 40 * gib},
-		{"Q8_0/m-Q8_0-00002-of-00002.gguf", 30 * gib},
-		{"m-Q4_K_M.gguf", 40 * gib},
-		{"mmproj-m-f16.gguf", 1 * gib},
-		{"README.md", 10},
+		{Path: "Q8_0/m-Q8_0-00001-of-00002.gguf", Size: 40 * gib},
+		{Path: "Q8_0/m-Q8_0-00002-of-00002.gguf", Size: 30 * gib},
+		{Path: "m-Q4_K_M.gguf", Size: 40 * gib},
+		{Path: "mmproj-m-f16.gguf", Size: 1 * gib},
+		{Path: "README.md", Size: 10},
 	})
 	if len(qs) != 2 {
 		t.Fatalf("got %d quants: %+v", len(qs), qs)
@@ -45,19 +45,19 @@ func TestQuantsGroupsParts(t *testing.T) {
 // model's Q8_0, and a 70B model's Q4_K_M needs an 80 GB A100.
 func TestPick(t *testing.T) {
 	small := Quants([]File{
-		{"m-Q8_0.gguf", 8_500_000_000},
-		{"m-Q6_K.gguf", 6_600_000_000},
-		{"m-Q4_K_M.gguf", 4_900_000_000},
-		{"m-F16.gguf", 16_000_000_000},
+		{Path: "m-Q8_0.gguf", Size: 8_500_000_000},
+		{Path: "m-Q6_K.gguf", Size: 6_600_000_000},
+		{Path: "m-Q4_K_M.gguf", Size: 4_900_000_000},
+		{Path: "m-F16.gguf", Size: 16_000_000_000},
 	})
 	c, err := Pick(small, 15*gib, 12*gib, 8192, "")
 	if err != nil || c.Name != "Q8_0" || !c.Fits {
 		t.Errorf("8B on a T4: %+v, %v", c, err)
 	}
 	big := Quants([]File{
-		{"m-Q4_K_M-00001-of-00002.gguf", 21_000_000_000},
-		{"m-Q4_K_M-00002-of-00002.gguf", 21_500_000_000},
-		{"m-Q2_K.gguf", 26_000_000_000},
+		{Path: "m-Q4_K_M-00001-of-00002.gguf", Size: 21_000_000_000},
+		{Path: "m-Q4_K_M-00002-of-00002.gguf", Size: 21_500_000_000},
+		{Path: "m-Q2_K.gguf", Size: 26_000_000_000},
 	})
 	if c, _ := Pick(big, 40*gib, 80*gib, 8192, ""); c.Name != "Q2_K" {
 		t.Errorf("70B on a 40 GB A100 picked %s", c.Name)

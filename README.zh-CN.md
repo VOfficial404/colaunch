@@ -19,6 +19,7 @@ Windows · macOS · Linux · Android · iOS —— 一个小巧的原生应用�
 ## 功能
 
 - 🚀 **一键部署模型**：填一个 Hugging Face 的 GGUF 仓库，自动在 Colab GPU 上用 llama.cpp 跑起来，直接给你 **OpenAI 兼容 API** 和**网页聊天**；还会按实际分到的显卡，自动挑**放得下的最佳量化版本**（连 KV cache 一起算）。
+- 🎨 **生图与生视频**：用内置 ComfyUI 任务部署 Qwen-Image 2.1 Base 和 Turbo、FLUX.1、Z-Image、Wan 等扩散 GGUF 模型。在「创作」页直接生成，或打开 ComfyUI 网页里的预置工作流。[ComfyUI 指南](docs/comfyui.md#部署模型)
 - 🖥 **硬件随便选**：CPU、GPU、TPU、高内存，还能设**最低显存**——A100 会随机给 40 GB 或 80 GB，不够就自动退掉重试。
 - 🎯 **抢卡**：Colab 经常没卡可分时，自动一轮一轮重试，按顺序尝试你勾选的备选加速器（只用你选定的账号）；抢到后弹系统通知。
 - 💰 **费用保护**：定时自动停止和闲置停止，**由运行时自己执行，关掉应用也照样生效**；另外还有花费上限和余额下限。余额、消耗速度、还能用多久，实时显示。
@@ -60,6 +61,8 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 任何 OpenAI 客户端都能用：把 Base URL 设为 `http://127.0.0.1:8080/v1` 即可。
+
+要生成图片或视频，在「部署」页选择「生图与生视频（ComfyUI）」，填入扩散 GGUF 仓库，例如 `abenzerps/Qwen-Image-2.1-Turbo-Quantized`。运行时就绪后，点「去创作」，或点 ComfyUI 地址旁的「打开」。免费托管运行时如果主要通过网页界面生成内容，可能会被 Colab 终止。所有 Colab 托管运行时均禁止深度伪造。[部署、工作流和显存参考](docs/comfyui.md#部署模型)
 
 ## 后台运行
 

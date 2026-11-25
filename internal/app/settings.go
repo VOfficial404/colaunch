@@ -56,7 +56,7 @@ func (a *App) settingsPage(c *ui.Context) {
 		if isNarrow(c) {
 			// Phones have no sidebar: the other pages are here.
 			card(c, func() {
-				for _, p := range []string{pagePorts, pagePlugins} {
+				for _, p := range settingsLinks {
 					it := navFor(p)
 					row := ui.Row(c.Key("link-" + p)).Gap(10).AlignItems(ui.Center).PaddingY(6).Focusable().Role(ui.RoleButton).Label(i18n.T(it.key))
 					row.Children(func() {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -38,6 +39,7 @@ const (
 	pageDeploy   = "deploy"
 	pageRuntimes = "runtimes"
 	pageChat     = "chat"
+	pageCreate   = "create"
 	pagePorts    = "ports"
 	pageAccounts = "accounts"
 	pagePlugins  = "plugins"
@@ -54,6 +56,7 @@ type App struct {
 	deploy   deployState
 	runtimes runtimesState
 	chat     chatState
+	create   createState
 	ports    portsState
 	accounts accountsState
 	settings settingsState
@@ -133,6 +136,13 @@ func Run() error {
 			a.win.Update(func() { a.openLink(link) })
 		}
 	})
+	// What the Create page made lives until the app quits; what a crash
+	// left goes now.
+	if dir, err := mygo.App.Path(mygo.PathCache); err == nil {
+		a.create.dir = filepath.Join(dir, "creations")
+		os.RemoveAll(a.create.dir)
+	}
+	mygo.App.OnQuit(a.create.cleanup)
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
 	mygo.App.OnQuitCanceled(func() { a.quitting = false })
 	mygo.App.OnLocaleChanged(func(tag string) {
@@ -231,14 +241,20 @@ var navItems = []navItem{
 	{pageDeploy, iconRocket, "nav.deploy"},
 	{pageRuntimes, iconServer, "nav.runtimes"},
 	{pageChat, iconChat, "nav.chat"},
+	{pageCreate, iconSparkles, "nav.create"},
 	{pagePorts, iconCable, "nav.ports"},
 	{pageAccounts, iconUsers, "nav.accounts"},
 	{pagePlugins, iconPuzzle, "nav.tasks"},
 	{pageSettings, iconSettings, "nav.settings"},
 }
 
-// mobileNav are the tabs phones show; the others are under Settings.
-var mobileNav = []string{pageDeploy, pageRuntimes, pageChat, pageAccounts, pageSettings}
+// mobileNav are the tabs phones show; the others, settingsLinks, are
+// under Settings. Accounts are set up once and switched seldom, so they
+// leave their tab to Create.
+var (
+	mobileNav     = []string{pageDeploy, pageRuntimes, pageChat, pageCreate, pageSettings}
+	settingsLinks = []string{pageAccounts, pagePorts, pagePlugins}
+)
 
 func (a *App) wide(c *ui.Context) {
 	t := c.Theme()
@@ -256,6 +272,9 @@ func (a *App) wide(c *ui.Context) {
 							item.Children(func() { ui.Badge(c, itoa(n)) })
 						}
 					}
+					if it.page == pageCreate && a.generating() > 0 {
+						item.Children(func() { ui.Spinner(c) })
+					}
 				}
 			}).Grow(1)
 			a.accountFooter(c)
@@ -271,7 +290,7 @@ func (a *App) narrow(c *ui.Context) {
 		ui.Row(c).BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Background(t.Surface).PaddingY(4).Children(func() {
 			for _, p := range mobileNav {
 				it := navFor(p)
-				active := a.page == p || (p == pageSettings && (a.page == pagePorts || a.page == pagePlugins))
+				active := a.page == p || (p == pageSettings && slices.Contains(settingsLinks, a.page))
 				color := t.TextMuted
 				if active {
 					color = t.Accent
@@ -313,6 +332,8 @@ func (a *App) content(c *ui.Context) {
 		a.runtimesPage(c)
 	case pageChat:
 		a.chatPage(c)
+	case pageCreate:
+		a.createPage(c)
 	case pagePorts:
 		a.portsPage(c)
 	case pageAccounts:

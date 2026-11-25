@@ -77,6 +77,9 @@ const (
 	PortOpenAI PortKind = "openai"
 	// PortWeb serves a web page.
 	PortWeb PortKind = "web"
+	// PortComfy serves ComfyUI: its web page at /, and its API, which
+	// the app generates images and videos with (internal/comfy).
+	PortComfy PortKind = "comfyui"
 	// PortTCP is anything else.
 	PortTCP PortKind = "tcp"
 )

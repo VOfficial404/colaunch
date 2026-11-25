@@ -137,6 +137,24 @@ func TestPagesBuild(t *testing.T) {
 						save(t, tt, filepath.Join(shots, fmt.Sprintf("tasks-%s-%s-%s.png", name, size.name, lang)))
 					}
 				}
+				// The Create page's states: none to run on, the form, a
+				// run under way and results.
+				for _, v := range createViews(t, a) {
+					v.setup()
+					tt.Frame()
+					for _, s := range tt.Texts() {
+						if i18n.Has(s) {
+							t.Errorf("%s %s create %s shows the key %q", lang, size.name, v.name, s)
+						}
+					}
+					if shots != "" && lang != "zh-Hant" {
+						theme := "light"
+						if dark {
+							theme = "dark"
+						}
+						save(t, tt, filepath.Join(shots, fmt.Sprintf("create-%s-%s-%s-%s.png", v.name, size.name, theme, lang)))
+					}
+				}
 			}
 		}
 	}

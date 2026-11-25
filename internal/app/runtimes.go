@@ -167,6 +167,7 @@ func (a *App) runtimesPage(c *ui.Context) {
 						})
 						ui.Text(c, fmt.Sprintf("%s · %s · %s", s.Spec, duration(s.Uptime()), stopReason(s))).FontSize(12).TextColor(t.TextMuted)
 						a.errorNotice(c, "h"+s.ID, s.Err)
+						a.comfySuggestion(c, s.Err, s.Values[comfyRepo])
 						if r.showLog[s.ID] {
 							a.logBox(c, s)
 						}
@@ -232,6 +233,7 @@ func (a *App) sessionCard(c *ui.Context, s *core.Session) {
 			a.progress(c, s)
 		}
 		a.errorNotice(c, s.ID, s.Err)
+		a.comfySuggestion(c, s.Err, s.Values[comfyRepo])
 
 		if s.Phase == core.PhaseRunning {
 			a.endpoints(c, s)
@@ -244,6 +246,12 @@ func (a *App) sessionCard(c *ui.Context, s *core.Session) {
 				if labeledButton(c, iconChat, i18n.T("nav.chat"), true).Clicked() {
 					a.chat.session = s.ID
 					a.page = pageChat
+				}
+			}
+			if s.Phase == core.PhaseRunning && isComfy(s) {
+				if labeledButton(c, iconSparkles, i18n.T("create.go"), true).Clicked() {
+					a.create.session = s.ID
+					a.page = pageCreate
 				}
 			}
 			if labeledButton(c, iconLog, i18n.T("runtimes.log"), false).Clicked() {
@@ -401,7 +409,7 @@ func (a *App) endpoints(c *ui.Context, s *core.Session) {
 						openURL(f.URL())
 					}
 				})
-			case plugins.PortWeb:
+			case plugins.PortWeb, plugins.PortComfy:
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					a.copyable(c, f.Port.Name, f.URL())
 				})

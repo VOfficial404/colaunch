@@ -2,16 +2,16 @@
   "version": 1,
   "tasks": [
     {
-      "id": "comfyui",
+      "id": "comfyui-manual",
       "name": {
-        "en": "ComfyUI",
-        "zh-Hans": "ComfyUI",
-        "zh-Hant": "ComfyUI"
+        "en": "ComfyUI (bring your own models)",
+        "zh-Hans": "ComfyUI（自行添加模型）",
+        "zh-Hant": "ComfyUI（自行加入模型）"
       },
       "description": {
-        "en": "Node-based image generation, at 127.0.0.1:8188. Colab may end free-tier runtimes that run image-generation UIs: a paid plan is safer.",
-        "zh-Hans": "节点式图像生成，映射到 127.0.0.1:8188。Colab 可能终止运行图像生成界面的免费运行时，建议使用付费方案。",
-        "zh-Hant": "節點式影像生成，對應到 127.0.0.1:8188。Colab 可能終止執行影像生成介面的免費執行階段，建議使用付費方案。"
+        "en": "Plain ComfyUI at 127.0.0.1:8188, with one checkpoint to download or none. The built-in “Images and videos (ComfyUI)” plugin is easier: it downloads a GGUF model with its text encoders and VAE and opens a ready workflow. Colab may end free-tier runtimes that run image-generation UIs: a paid plan is safer.",
+        "zh-Hans": "原版 ComfyUI，映射到 127.0.0.1:8188，可下载一个模型或不下载。内置的「生图与生视频（ComfyUI）」插件更方便：自动下载 GGUF 模型及其文本编码器和 VAE，并备好工作流。Colab 可能终止运行图像生成界面的免费运行时，建议使用付费方案。",
+        "zh-Hant": "原版 ComfyUI，對應到 127.0.0.1:8188，可下載一個模型或不下載。內建的「生圖與生影片（ComfyUI）」外掛更方便：自動下載 GGUF 模型及其文字編碼器與 VAE，並備好工作流程。Colab 可能終止執行影像生成介面的免費執行階段，建議使用付費方案。"
       },
       "author": "VOfficial404",
       "path": "comfyui.colaunch.json",
@@ -20,7 +20,7 @@
         "web",
         "gpu"
       ],
-      "sha256": "fbca894fa7ecd8d7f0ad71d8596ddb557c0330fe264af05f83e8bb1dff37fa13"
+      "sha256": "d2bde43d31ebcaff866f6cc3c161d7c934156a3c472e0664ba4b5c8da5bd3186"
     },
     {
       "id": "ollama",

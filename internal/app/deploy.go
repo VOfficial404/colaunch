@@ -24,6 +24,9 @@ type deployState struct {
 	// grabOpen and guardsOpen unfold the sections that show as a line.
 	grabOpen   bool
 	guardsOpen bool
+	// launched is the session the form last started, whose error shows
+	// under the form when llama.cpp refused its model.
+	launched string
 }
 
 var variants = []string{"cpu", "gpu", "tpu"}
@@ -77,6 +80,9 @@ func (a *App) deployPage(c *ui.Context) {
 		if isFreeTier(acct) {
 			freeTierNotice(c)
 		}
+		if d.form.Plugin == comfyPlugin {
+			comfyNotice(c)
+		}
 		// What and where.
 		p := plugins.Get(d.form.Plugin)
 		section(c, i18n.T("deploy.what"), func() {
@@ -94,6 +100,7 @@ func (a *App) deployPage(c *ui.Context) {
 					for i, n := range names {
 						if n == chosen {
 							d.form.Plugin = all[i].ID()
+							d.launched = ""
 						}
 					}
 				}
@@ -144,6 +151,14 @@ func (a *App) launchBar(c *ui.Context, acct *core.Account) {
 	}
 	if d.err != "" {
 		a.errorNotice(c, "deploy", d.err)
+		a.comfySuggestion(c, d.err, d.values(plugins.Get(d.form.Plugin))[comfyRepo])
+	} else if s := a.m.Session(d.launched); s != nil && s.Phase == core.PhaseFailed {
+		// llama.cpp refuses image and video models before a runtime is
+		// assigned: the way on is from here.
+		if _, ok := suggestComfy(s.Err, s.Values[comfyRepo]); ok {
+			a.errorNotice(c, "deploy-"+s.ID, s.Err)
+			a.comfySuggestion(c, s.Err, s.Values[comfyRepo])
+		}
 	}
 }
 
@@ -201,7 +216,7 @@ func foldSection(c *ui.Context, key, title, summary string, open *bool, fn func(
 
 func (a *App) launch() {
 	d := &a.deploy
-	d.err = ""
+	d.err, d.launched = "", ""
 	d.form.Variant = variants[d.variant]
 	p := plugins.Get(d.form.Plugin)
 	v := d.values(p)
@@ -229,6 +244,7 @@ func (a *App) launch() {
 	}
 	a.runtimes.remember(s.ID, d.form.Machine)
 	a.runtimes.selected = s.ID
+	d.launched = s.ID
 	a.page = pageRuntimes
 }
 

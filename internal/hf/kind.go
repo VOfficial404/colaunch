@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -18,6 +20,31 @@ type Info struct {
 	// "text-to-image".
 	Pipeline string
 	Tags     []string
+	// SHA is the commit of the main branch, "" when not told.
+	SHA string
+}
+
+// BaseModels are the models the repository's says it's made from, by its
+// "base_model:" tags, as "Qwen/Qwen-Image" for a quantization of it.
+func (i *Info) BaseModels() []string {
+	if i == nil {
+		return nil
+	}
+	var out []string
+	for _, t := range i.Tags {
+		rest, ok := strings.CutPrefix(t, "base_model:")
+		if !ok {
+			continue
+		}
+		// "base_model:quantized:Qwen/Qwen-Image" says how it's made.
+		if kind, repo, ok := strings.Cut(rest, ":"); ok && !strings.Contains(kind, "/") {
+			rest = repo
+		}
+		if rest != "" && !slices.Contains(out, rest) {
+			out = append(out, rest)
+		}
+	}
+	return out
 }
 
 // ErrNotLLM is returned for a model llama.cpp's server can't run, as an
@@ -32,7 +59,7 @@ func FetchInfo(ctx context.Context, repo, token string) (*Info, error) {
 		return nil, err
 	}
 	token = TokenFor(endpoint, token)
-	u := fmt.Sprintf("%s/api/models/%s?expand%%5B%%5D=gguf&expand%%5B%%5D=pipeline_tag&expand%%5B%%5D=tags", endpoint, repo)
+	u := fmt.Sprintf("%s/api/models/%s?expand%%5B%%5D=gguf&expand%%5B%%5D=pipeline_tag&expand%%5B%%5D=tags&expand%%5B%%5D=sha", endpoint, repo)
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
@@ -54,16 +81,22 @@ func FetchInfo(ctx context.Context, repo, token string) (*Info, error) {
 		} `json:"gguf"`
 		Pipeline string   `json:"pipeline_tag"`
 		Tags     []string `json:"tags"`
+		SHA      string   `json:"sha"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 4<<20)).Decode(&r); err != nil {
 		return nil, err
 	}
 	info := &Info{Pipeline: r.Pipeline, Tags: r.Tags}
+	if commitPattern.MatchString(r.SHA) {
+		info.SHA = r.SHA
+	}
 	if r.GGUF != nil {
 		info.Architecture = r.GGUF.Architecture
 	}
 	return info, nil
 }
+
+var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // Pipelines llama-server has nothing to do with.
 var otherPipelines = map[string]bool{
@@ -75,8 +108,19 @@ var otherPipelines = map[string]bool{
 // GGUF architectures of diffusion models, which stable-diffusion.cpp and
 // ComfyUI-GGUF read and llama.cpp doesn't.
 var diffusionArchitectures = []string{
-	"qwen_image", "flux", "sd", "sd1", "sd2", "sdxl", "sd3", "wan", "hunyuan", "hidream",
-	"ltxv", "cosmos", "lumina", "chroma", "aura", "pixart", "mochi", "cogvideo", "kontext",
+	"qwen_image", "qwen_image21", "flux", "sd", "sd1", "sd2", "sdxl", "sd3", "wan", "hunyuan", "hyvid", "hidream",
+	"ltxv", "cosmos", "lumina", "lumina2", "chroma", "aura", "pixart", "mochi", "cogvideo", "kontext",
+}
+
+// IsDiffusion reports whether a GGUF architecture is a diffusion model's.
+func IsDiffusion(arch string) bool {
+	arch = strings.ToLower(arch)
+	for _, a := range diffusionArchitectures {
+		if arch == a || strings.HasPrefix(arch, a+"_") {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckServable returns ErrNotLLM, with what the model is, for a model
@@ -86,13 +130,7 @@ func (i *Info) CheckServable() error {
 		return nil
 	}
 	arch := strings.ToLower(i.Architecture)
-	diffusion := false
-	for _, a := range diffusionArchitectures {
-		if arch == a || strings.HasPrefix(arch, a+"_") {
-			diffusion = true
-		}
-	}
-	if !diffusion && !otherPipelines[i.Pipeline] {
+	if !IsDiffusion(arch) && !otherPipelines[i.Pipeline] {
 		return nil
 	}
 	what := i.Pipeline
@@ -102,5 +140,5 @@ func (i *Info) CheckServable() error {
 	if arch != "" {
 		what += ", " + arch
 	}
-	return fmt.Errorf("%w: it is a %s model; run it with the ComfyUI task instead", ErrNotLLM, what)
+	return fmt.Errorf("%w: it is a %s model, for ComfyUI", ErrNotLLM, what)
 }

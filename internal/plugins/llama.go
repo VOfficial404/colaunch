@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -12,6 +13,7 @@ import (
 
 	"colaunch/internal/agent"
 	"colaunch/internal/colab"
+	"colaunch/internal/comfy"
 	"colaunch/internal/hf"
 )
 
@@ -125,7 +127,7 @@ func (l Llama) Validate(ctx context.Context, values map[string]string, hfToken s
 	// say what the model is lets it through.
 	if info, err := hf.FetchInfo(ctx, ref.Repo, hfToken); err == nil {
 		if err := info.CheckServable(); err != nil {
-			return nil, fmt.Errorf("%s: %w", ref.Repo, err)
+			return nil, notLLM(ref.Repo, info, err)
 		}
 	}
 	quants := hf.Quants(files)
@@ -292,4 +294,56 @@ func atoi(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// ComfyHint is llama.cpp refusing a model that the comfyui plugin runs.
+type ComfyHint struct {
+	Repo   string
+	Family string
+	Err    error
+}
+
+// comfyHintText is what the error says, for SuggestComfy to find in its
+// text alone, as after it's been shown and kept as a string.
+const comfyHintText = "use the comfyui plugin"
+
+func (e *ComfyHint) Error() string {
+	f := comfy.FamilyByID(e.Family)
+	return fmt.Sprintf("%s: %v. It is a %s model: %s to deploy it", e.Repo, e.Err, f.Name["en"], comfyHintText)
+}
+
+func (e *ComfyHint) Unwrap() error { return e.Err }
+
+// notLLM is the error for a model llama.cpp can't serve: a ComfyHint
+// when it's of a family the comfyui plugin runs.
+func notLLM(repo string, info *hf.Info, err error) error {
+	if f, ferr := comfy.Detect(repo, info); ferr == nil {
+		return &ComfyHint{Repo: repo, Family: f.ID, Err: err}
+	}
+	return fmt.Errorf("%s: %w; the built-in comfyui plugin doesn't know its family, but the ComfyUI community task can run it", repo, err)
+}
+
+// SuggestComfy tells whether err is llama.cpp refusing a model the
+// comfyui plugin runs, and the repository to deploy with it. It reads a
+// ComfyHint, or the text of one.
+func SuggestComfy(err error) (repo string, ok bool) {
+	if err == nil {
+		return "", false
+	}
+	var h *ComfyHint
+	if errors.As(err, &h) {
+		return h.Repo, true
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, comfyHintText) {
+		return "", false
+	}
+	// The repository starts the text, maybe after what wrapped it.
+	for _, part := range strings.Split(msg, ": ") {
+		part = strings.TrimSpace(part)
+		if ref, err := hf.ParseRef(part); err == nil && ref.Quant == "" && !strings.ContainsAny(part, " ") {
+			return ref.Repo, true
+		}
+	}
+	return "", true
 }

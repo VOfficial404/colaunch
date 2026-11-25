@@ -19,6 +19,7 @@ English · [简体中文](README.zh-CN.md)
 ## What it does
 
 - 🚀 **One-click model deployment** — paste a Hugging Face GGUF repository and Colaunch gets a Colab GPU, runs the model with llama.cpp, and hands you an **OpenAI-compatible API** and a **web chat**. It looks at the GPU it actually got and picks **the best quantization that fits**, KV cache included.
+- 🎨 **Images and videos** — deploy diffusion GGUFs with the built-in ComfyUI task, including Qwen-Image 2.1 Base and Turbo, FLUX.1, Z-Image and Wan. Generate on the **Create** page or open the ready workflow in ComfyUI's web interface. [ComfyUI guide](docs/comfyui.md)
 - 🖥 **Any hardware** — CPU, GPU, TPU, High-RAM. Set **the least GPU memory** you'll take: an A100 comes with 40 or 80 GB at random, and one with too little is given back and another assigned, automatically.
 - 🎯 **Grab a GPU when there are none** — Colab often has nothing to give: Colaunch keeps asking, round after round and falls back to the other accelerators you tick, on the account you chose. A desktop notification tells you once it got one.
 - 💰 **Cost protection** — stop on a schedule and when idle, **enforced on the runtime itself so they hold with the app closed**; plus a spending cap and a balance floor. Balance, burn rate and how long it lasts, live.
@@ -60,6 +61,8 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Any OpenAI client works: set its base URL to `http://127.0.0.1:8080/v1`.
+
+For images and videos, select **Images and videos (ComfyUI)** on **Deploy** and enter a diffusion GGUF repository, such as `abenzerps/Qwen-Image-2.1-Turbo-Quantized`. Use **Create** on the running session or **Open** beside its ComfyUI address. Colab may terminate free managed runtimes used primarily through a web UI for content generation, and it prohibits deepfakes on all managed runtimes. [Setup, workflows and GPU guidance](docs/comfyui.md)
 
 ## Background operation
 

@@ -66,6 +66,9 @@ var HTTP = &http.Client{Timeout: 30 * time.Second}
 type File struct {
 	Path string
 	Size int64
+	// SHA256 is the file's sha256, as Hugging Face gives it for files
+	// stored with LFS; "" for others.
+	SHA256 string
 }
 
 // Ref is a repository, and the quantization asked for, if any, as in
@@ -134,7 +137,8 @@ func ListFiles(ctx context.Context, repo, token string) ([]File, error) {
 		Path string `json:"path"`
 		Size int64  `json:"size"`
 		LFS  *struct {
-			Size int64 `json:"size"`
+			Size int64  `json:"size"`
+			OID  string `json:"oid"`
 		} `json:"lfs"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
@@ -145,13 +149,65 @@ func ListFiles(ctx context.Context, repo, token string) ([]File, error) {
 		if e.Type != "file" {
 			continue
 		}
-		size := e.Size
-		if e.LFS != nil && e.LFS.Size > 0 {
-			size = e.LFS.Size
+		f := File{Path: e.Path, Size: e.Size}
+		if e.LFS != nil {
+			if e.LFS.Size > 0 {
+				f.Size = e.LFS.Size
+			}
+			if sha256Pattern.MatchString(e.LFS.OID) {
+				f.SHA256 = strings.ToLower(e.LFS.OID)
+			}
 		}
-		files = append(files, File{Path: e.Path, Size: size})
+		files = append(files, f)
 	}
 	return files, nil
+}
+
+var sha256Pattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// FileRef is a file of a repository, as a LoRA's.
+type FileRef struct {
+	Repo string
+	Path string
+}
+
+var filePathPattern = regexp.MustCompile(`^[\w.\-]+(/[\w.\-]+)*$`)
+
+// ParseFileRef reads a file of a repository as people write it:
+// "user/repo/path/to/file", or its address on huggingface.co, as
+// https://huggingface.co/user/repo/blob/main/path/to/file. Only the main
+// branch is read.
+func ParseFileRef(s string) (FileRef, error) {
+	s = strings.TrimSpace(s)
+	bad := fmt.Errorf("hf: %q isn't a file of a repository, as user/repo/file", s)
+	if u, err := url.Parse(s); err == nil && u.Host != "" {
+		if u.Scheme != "https" || !strings.EqualFold(strings.TrimPrefix(u.Hostname(), "www."), "huggingface.co") && !strings.EqualFold(u.Hostname(), "hf.co") {
+			return FileRef{}, fmt.Errorf("hf: %q isn't an address on huggingface.co", s)
+		}
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) < 3 {
+			return FileRef{}, bad
+		}
+		rest := parts[2:]
+		if len(rest) >= 3 && (rest[0] == "blob" || rest[0] == "resolve") {
+			if rest[1] != "main" {
+				return FileRef{}, fmt.Errorf("hf: %q: only files of the main branch are read", s)
+			}
+			rest = rest[2:]
+		}
+		s = parts[0] + "/" + parts[1] + "/" + strings.Join(rest, "/")
+	}
+	s = strings.TrimPrefix(s, "hf.co/")
+	parts := strings.SplitN(s, "/", 3)
+	if len(parts) != 3 || !repoPattern.MatchString(parts[0]+"/"+parts[1]) || !filePathPattern.MatchString(parts[2]) {
+		return FileRef{}, bad
+	}
+	for _, p := range strings.Split(parts[2], "/") {
+		if p == "." || p == ".." {
+			return FileRef{}, bad
+		}
+	}
+	return FileRef{Repo: parts[0] + "/" + parts[1], Path: parts[2]}, nil
 }
 
 // DownloadURL is where a file of a repository downloads from.
@@ -293,24 +349,31 @@ var ErrTooBig = errors.New("hf: no quantization of the model fits in this machin
 // machine's memory beside the GPU, with layers on the CPU. want picks a
 // quantization by name instead.
 func Pick(quants []Quant, mem, spill int64, ctx int, want string) (Choice, error) {
+	return PickBy(quants, mem, spill, want, func(size int64) int64 { return Need(size, ctx) })
+}
+
+// PickBy is Pick with need, the memory a quantization of size bytes
+// needs, in place of a language model's: diffusion models count their
+// text encoders and VAE instead of a context.
+func PickBy(quants []Quant, mem, spill int64, want string, need func(size int64) int64) (Choice, error) {
 	if len(quants) == 0 {
 		return Choice{}, errors.New("hf: the repository has no GGUF files")
 	}
 	if want != "" && want != "AUTO" {
 		for _, q := range quants {
 			if q.Name == want {
-				return Choice{Quant: q, Fits: Need(q.Size, ctx) <= mem}, nil
+				return Choice{Quant: q, Fits: need(q.Size) <= mem}, nil
 			}
 		}
 		return Choice{}, fmt.Errorf("hf: the repository has no %s file", want)
 	}
 	for _, q := range quants {
-		if Need(q.Size, ctx) <= mem {
+		if need(q.Size) <= mem {
 			return Choice{Quant: q, Fits: true}, nil
 		}
 	}
 	for _, q := range quants {
-		if Need(q.Size, ctx) <= mem+spill {
+		if need(q.Size) <= mem+spill {
 			return Choice{Quant: q}, nil
 		}
 	}

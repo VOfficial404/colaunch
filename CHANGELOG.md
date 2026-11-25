@@ -2,6 +2,13 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.5]
+
+- Deploy text-to-image and text-to-video GGUFs with the built-in ComfyUI task. It chooses a quantization for the assigned GPU, downloads the companion files and prepares a workflow for the ComfyUI web interface.
+- The Create page runs generation on a ready ComfyUI runtime. Set prompts, sizes, seeds and video settings, track or stop generation, and preview, save, share or regenerate results.
+- Qwen-Image 2.1 Base and Turbo are supported, including `abenzerps/Qwen-Image-2.1-Turbo-Quantized`. Turbo uses the official eight-step schedule by default. Both use Comfy-Org's public Qwen3-VL W4A8 encoder and 2.1 VAE.
+- The llama.cpp error for diffusion models now links to the built-in ComfyUI deployment with the repository filled in.
+
 ## [0.1.4]
 
 - The Deploy page refuses image and video models made for ComfyUI, such as Qwen-Image or FLUX GGUFs, before a GPU is assigned: llama.cpp can't run them. The error says to use the ComfyUI task.
