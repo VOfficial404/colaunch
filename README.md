@@ -20,7 +20,7 @@ English · [简体中文](README.zh-CN.md)
 
 - 🚀 **One-click model deployment** — paste a Hugging Face GGUF repository and Colaunch gets a Colab GPU, runs the model with llama.cpp, and hands you an **OpenAI-compatible API** and a **web chat**. It looks at the GPU it actually got and picks **the best quantization that fits**, KV cache included.
 - 🖥 **Any hardware** — CPU, GPU, TPU, High-RAM. Set **the least GPU memory** you'll take: an A100 comes with 40 or 80 GB at random, and one with too little is given back and another assigned, automatically.
-- 🎯 **Grab a GPU when there are none** — Colab often has nothing to give: Colaunch keeps asking, round after round, falls back to the other accelerators you tick, and can rotate through your other accounts. A desktop notification tells you once it got one.
+- 🎯 **Grab a GPU when there are none** — Colab often has nothing to give: Colaunch keeps asking, round after round and falls back to the other accelerators you tick, on the account you chose. A desktop notification tells you once it got one.
 - 💰 **Cost protection** — stop on a schedule and when idle, **enforced on the runtime itself so they hold with the app closed**; plus a spending cap and a balance floor. Balance, burn rate and how long it lasts, live.
 - 👥 **Several Google accounts** — manage them together, switch any time, see every account's balance.
 - 🔌 **Port forwarding** — any port of the runtime on your `127.0.0.1`, through Colab's own connection: no ngrok, no cloudflared, nothing public.
@@ -112,6 +112,7 @@ MYGO_LDFLAGS="-X colaunch/internal/core.defaultClientID=… -X colaunch/internal
 
 ## Notes
 
+- Colab forbids using several accounts to get around its limits, and on the free tier it may end runtimes used through a web UI instead of a notebook at any time ([restricted activities](https://research.google.com/colaboratory/faq.html#disallowed-activities)). Colaunch only grabs on the account you pick, and doesn't fake activity to stop Colab reclaiming idle runtimes.
 - Colaunch is not affiliated with Google. Colab's [terms](https://research.google.com/colaboratory/tos_v5.html) and [limitations](https://research.google.com/colaboratory/faq.html#limitations-and-restrictions) apply to what you run.
 - Compute units cost money. The limits help, but check the balance Colab shows too.
 - Refresh tokens stay in the system's keychain (Keychain, Credential Manager, Secret Service).

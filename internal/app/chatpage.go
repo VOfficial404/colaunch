@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
@@ -186,6 +188,10 @@ func (a *App) chatMessage(c *ui.Context, m *message) {
 	})
 }
 
+// chatFrame is how often a streaming reply is drawn, about 30 times a
+// second.
+const chatFrame = 33 * time.Millisecond
+
 func (a *App) send(s *core.Session, cv *conversation) {
 	ch := &a.chat
 	cv.next++
@@ -211,13 +217,30 @@ func (a *App) send(s *core.Session, cv *conversation) {
 		model, key = s.Result.Model, s.Result.APIKey
 	}
 	go func() {
+		// The reply grows in builders, which the window reads at most
+		// every chatFrame: one redraw for the tokens that came meanwhile.
+		var mu sync.Mutex
+		var text, thought strings.Builder
+		pending := false
+		show := func() {
+			mu.Lock()
+			reply.text, reply.reasoning = text.String(), thought.String()
+			pending = false
+			mu.Unlock()
+		}
 		stats, err := chat.Stream(ctx, base, key, model, history, temp, func(content, reasoning string) {
-			a.win.Update(func() {
-				reply.text += content
-				reply.reasoning += reasoning
-			})
+			mu.Lock()
+			text.WriteString(content)
+			thought.WriteString(reasoning)
+			later := !pending
+			pending = true
+			mu.Unlock()
+			if later {
+				time.AfterFunc(chatFrame, func() { a.win.Update(show) })
+			}
 		})
 		a.win.Update(func() {
+			show()
 			reply.done = true
 			cv.streaming = false
 			cv.cancel = nil

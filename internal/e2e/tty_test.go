@@ -195,6 +195,37 @@ func TestShellUpload(t *testing.T) {
 	}
 }
 
+// An upload whose folder can't be made, or whose file can't be moved in
+// place, fails, leaves nothing behind, and the terminal reads commands on.
+func TestShellUploadFails(t *testing.T) {
+	conn := fakeColab(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	sh, err := colab.OpenShell(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sh.Close()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	os.WriteFile(file, []byte("x"), 0o644)
+	if err := sh.Upload(ctx, filepath.ToSlash(file)+"/sub/blob", []byte("data")); err == nil {
+		t.Error("uploading under a file worked")
+	}
+	// mv can't put a file in place of a folder.
+	os.MkdirAll(filepath.Join(dir, "folder", "inside"), 0o755)
+	if err := sh.Upload(ctx, filepath.ToSlash(filepath.Join(dir, "folder")), []byte("data")); err == nil {
+		t.Error("a failed mv went unnoticed")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Errorf("left behind: %v", entries)
+	}
+	if out, _, _ := sh.Run(ctx, "echo still here"); strings.TrimSpace(out) != "still here" {
+		t.Errorf("after the failed uploads: %q", out)
+	}
+}
+
 // A port of the runtime reaches 127.0.0.1 here through the agent's mux on
 // a terminal of its own, the way the app forwards llama-server's.
 func TestTunnelOverTerminal(t *testing.T) {

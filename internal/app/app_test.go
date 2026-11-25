@@ -76,9 +76,16 @@ func newTestApp(t *testing.T) *App {
 	wait.Created, wait.NextTry = time.Now().Add(-23*time.Minute), time.Now().Add(18*time.Second)
 	wait.Values = map[string]string{"repo": "unsloth/Llama-3.3-70B-Instruct-GGUF"}
 	wait.TryErr = "colab: no such accelerator is available now: L4"
-	m.Sessions = []*core.Session{run, dep, wait}
+	failed := &core.Session{Phase: core.PhaseFailed, StopReason: "failed"}
+	failed.ID, failed.Account, failed.Plugin = "d4", acct.Email, "llama"
+	failed.Spec = colab.Spec{Variant: colab.GPU, Accelerator: "L4"}
+	failed.Created, failed.StoppedAt = time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour+time.Minute)
+	failed.Values = map[string]string{"repo": "unsloth/Qwen3-8B-GGUF"}
+	failed.Err = "colab: the account has too many runtimes: stop one of its runtimes first"
+	m.Sessions = []*core.Session{failed, run, dep, wait}
 	a := &App{m: m, page: pageDeploy}
 	a.deploy.init(m)
+	a.runtimes.remember(wait.ID, core.Machine{Variant: "gpu", Accelerator: "H100", Fallbacks: []string{"A100", "L4"}, Grab: true, RetrySeconds: 30, MaxWait: 120})
 	a.deploy.form.Grab, a.deploy.form.Fallbacks = true, []string{"L4", "T4"}
 	a.deploy.form.Accelerator = "A100"
 	return a
@@ -159,6 +166,152 @@ func TestHardwareFollowsAccount(t *testing.T) {
 	tt.Frame()
 	if a.deploy.form.Accelerator != "V6E1" {
 		t.Errorf("accelerator %q for TPU", a.deploy.form.Accelerator)
+	}
+}
+
+// The errors people meet are explained; others show as they are.
+func TestExplainError(t *testing.T) {
+	cases := map[string]string{
+		colab.ErrUnavailable.Error() + ": L4":                     "err.unavailable",
+		colab.ErrQuota.Error():                                    "err.quota",
+		colab.ErrTooManyRuntimes.Error() + ": stop one":           "err.too_many",
+		colab.ErrDenylisted.Error():                               "err.denylisted",
+		colab.ErrUnauthorized.Error():                             "err.signed_out",
+		"google: the account's sign-in expired or was revoked":    "err.signed_out",
+		"google: no OAuth client is configured (Settings → ...)":  "err.no_client",
+		"hf: no such repository, or it needs an access token":     "err.hf_not_found",
+		"gave up after 3 tries in 1m: " + colab.ErrQuota.Error():  "err.quota",
+		"hf: no quantization of the model fits in this machine's": "err.too_big",
+	}
+	for msg, want := range cases {
+		if got, next, ok := explainError(msg); !ok || got != want || next != want+"_next" {
+			t.Errorf("%q: %q %q %v, want %q", msg, got, next, ok, want)
+		}
+	}
+	if _, _, ok := explainError("exit status 1"); ok {
+		t.Error("an unknown error was explained")
+	}
+}
+
+// Without an OAuth client, the guide's first step is the one to do, and
+// adding an account does nothing.
+func TestOnboardingNeedsClient(t *testing.T) {
+	i18n.SetLang("en")
+	m := core.New(t.TempDir(), mapSecrets{})
+	if m.Client().Valid() {
+		t.Skip("this build has an OAuth client")
+	}
+	a := &App{m: m, page: pageAccounts}
+	a.deploy.init(m)
+	tt := ui.NewTester(a.view, 1120, 780)
+	tt.Frame()
+	if a.onboardingStep() != 0 || !tt.HasText("Connect an OAuth client") {
+		t.Fatalf("step %d, texts %q", a.onboardingStep(), tt.Texts())
+	}
+	tt.Click("Add account")
+	tt.Frame()
+	if a.accounts.login != nil || a.accounts.err != "" {
+		t.Errorf("Add account tried to sign in: %q", a.accounts.err)
+	}
+	if shots := os.Getenv("COLAUNCH_SHOTS"); shots != "" {
+		for _, lang := range []string{"en", "zh-Hans"} {
+			i18n.SetLang(lang)
+			for _, size := range sizes {
+				for _, page := range []string{pageAccounts, pageDeploy} {
+					a.page = page
+					st := ui.NewTester(a.view, size.w, size.h)
+					st.Frame()
+					save(t, st, filepath.Join(shots, fmt.Sprintf("onboarding-%s-%s-%s.png", page, size.name, lang)))
+				}
+			}
+		}
+		i18n.SetLang("en")
+	}
+}
+
+// Stopping a runtime still grabbing asks to stop grabbing, not to give a
+// runtime back.
+func TestStopGrabbingAsks(t *testing.T) {
+	i18n.SetLang("en")
+	a := newTestApp(t)
+	a.page = pageRuntimes
+	tt := ui.NewTester(a.view, 1120, 2400)
+	tt.Frame()
+	if err := tt.Click("Stop grabbing"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.runtimes.toStop == nil || a.runtimes.toStop.ID != "c3" || !tt.HasText("Stop grabbing?") {
+		t.Fatalf("dialog for %v, texts %q", a.runtimes.toStop, tt.Texts())
+	}
+	if shots := os.Getenv("COLAUNCH_SHOTS"); shots != "" {
+		save(t, tt, filepath.Join(shots, "stop-grab-dialog.png"))
+	}
+}
+
+// Runtimes show running first, then starting, then waiting for one.
+func TestLiveOrder(t *testing.T) {
+	a := newTestApp(t)
+	live := a.m.Live()
+	sortLive(live)
+	var ids []string
+	for _, s := range live {
+		ids = append(ids, s.ID)
+	}
+	if fmt.Sprint(ids) != "[a1 b2 c3]" {
+		t.Errorf("order %v", ids)
+	}
+}
+
+// A click on a switch's label flips it.
+func TestSwitchLabelToggles(t *testing.T) {
+	i18n.SetLang("en")
+	a := newTestApp(t)
+	tt := ui.NewTester(a.view, 1120, 2400)
+	tt.Frame()
+	before := a.deploy.form.HighMem
+	if err := tt.Click("High-RAM"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.deploy.form.HighMem == before {
+		t.Error("clicking High-RAM didn't flip it")
+	}
+}
+
+// Launching without a required field says so below the field, and starts
+// nothing.
+func TestLaunchNeedsRequired(t *testing.T) {
+	i18n.SetLang("en")
+	a := newTestApp(t)
+	a.deploy.values(plugins.Get("llama"))["repo"] = ""
+	n := len(a.m.Sessions)
+	tt := ui.NewTester(a.view, 1120, 780)
+	tt.Frame()
+	if err := tt.Click("Launch"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if len(a.m.Sessions) != n || a.deploy.fieldErr["llama.repo"] == "" || !tt.HasText("Required") {
+		t.Errorf("sessions %d, field errors %v", len(a.m.Sessions), a.deploy.fieldErr)
+	}
+}
+
+// The log is written out again only when it has new lines.
+func TestLogCached(t *testing.T) {
+	a := newTestApp(t)
+	s := a.m.Session("b2")
+	tt := ui.NewTester(func(c *ui.Context) { a.logBox(c, s) }, 600, 400)
+	tt.Frame()
+	first := a.runtimes.logs[s.ID]
+	tt.Frame()
+	if a.runtimes.logs[s.ID] != first {
+		t.Error("the log was written out again without new lines")
+	}
+	s.Log = append(s.Log, core.LogLine{Time: time.Now(), Text: "more"})
+	tt.Frame()
+	if a.runtimes.logs[s.ID] == first || a.runtimes.logs[s.ID].n != 3 {
+		t.Error("the log didn't take its new line")
 	}
 }
 

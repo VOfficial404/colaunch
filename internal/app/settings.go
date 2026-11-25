@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/updater"
@@ -18,6 +19,8 @@ type settingsState struct {
 	clientID string
 	secret   string
 	hfToken  string
+	// hfSaved is the token as saved, read once: it is in the keychain.
+	hfSaved  string
 	hfURL    string
 	cudaURL  string
 	attempts float64
@@ -25,7 +28,7 @@ type settingsState struct {
 
 func (a *App) pluginsPage(c *ui.Context) {
 	t := c.Theme()
-	pageScroll(c, i18n.T("nav.plugins"), func() {
+	pageFrame(c, i18n.T("nav.plugins"), a.backToSettings(c), func() {
 		if iconButton(c, iconRefresh, i18n.T("plugins.reload")).Clicked() {
 			a.m.ReloadPlugins()
 		}
@@ -46,6 +49,9 @@ func (a *App) pluginsPage(c *ui.Context) {
 					}
 				})
 				ui.Text(c, p.Description().In(i18n.Lang())).FontSize(13).TextColor(t.TextMuted)
+				if sp, ok := p.(*plugins.ScriptPlugin); ok && sp.Manifest.HFToken {
+					ui.Text(c, i18n.T("plugins.hf_token")).FontSize(12).TextColor(t.Warning)
+				}
 				if ui.Button(c, i18n.T("plugins.use")).Clicked() {
 					a.deploy.form.Plugin = p.ID()
 					a.page = pageDeploy
@@ -68,7 +74,7 @@ func (a *App) pluginsPage(c *ui.Context) {
 			}
 		})
 		a.copyable(c, i18n.T("plugins.folder"), a.m.PluginsDir())
-	})
+	}, nil)
 }
 
 // writeExample puts the example plugin in the plugins folder when it has
@@ -89,6 +95,20 @@ func (a *App) writeExample(dir string) {
 
 var themes = []string{"system", "light", "dark"}
 
+// saveRow ends a section whose text waits to be saved: its Save button,
+// on the right, which does nothing until something changed. Everywhere in
+// Settings, choices (menus, switches) take effect at once, and what is
+// typed waits for its section's Save.
+func (a *App) saveRow(c *ui.Context, dirty bool, save func()) {
+	ui.Row(c).Gap(8).Children(func() {
+		ui.Spacer(c)
+		if ui.PrimaryButton(c, i18n.T("save")).Disabled(!dirty).Clicked() {
+			save()
+			a.toasts = append(a.toasts, ui.Toast{Title: i18n.T("saved"), Type: "success", Timeout: 1500e6})
+		}
+	})
+}
+
 func (a *App) settingsPage(c *ui.Context) {
 	s := &a.settings
 	set := &a.m.Settings
@@ -96,18 +116,24 @@ func (a *App) settingsPage(c *ui.Context) {
 		s.loaded = true
 		s.clientID, s.secret = set.OAuth.ID, set.OAuth.Secret
 		s.hfToken = a.m.HFToken()
+		s.hfSaved = s.hfToken
 		s.hfURL, s.cudaURL = set.HFEndpoint, set.LlamaCUDAURL
 		s.attempts = float64(set.MaxAttempts)
 	}
 	t := c.Theme()
 	pageScroll(c, i18n.T("nav.settings"), nil, func() {
-		w, _ := c.Size()
-		if w < 720 {
+		if isNarrow(c) {
 			// Phones have no sidebar: the other pages are here.
 			card(c, func() {
 				for _, p := range []string{pagePorts, pagePlugins} {
 					it := navFor(p)
-					if labeledButton(c, it.icon, i18n.T(it.key), false).Clicked() {
+					row := ui.Row(c.Key("link-" + p)).Gap(10).AlignItems(ui.Center).PaddingY(6).Focusable().Role(ui.RoleButton).Label(i18n.T(it.key))
+					row.Children(func() {
+						ui.Icon(c, it.icon).TextColor(accent)
+						ui.Text(c, i18n.T(it.key)).Grow(1)
+						ui.Icon(c, iconChevronRight).TextColor(t.TextMuted)
+					})
+					if row.Clicked() {
 						a.page = p
 					}
 				}
@@ -151,8 +177,7 @@ func (a *App) settingsPage(c *ui.Context) {
 		if isDesktop() || runtime.GOOS == "android" || runtime.GOOS == "ios" {
 			section(c, i18n.T("background.title"), func() {
 				enabled := set.BackgroundEnabled()
-				switchRow(c, &enabled, i18n.T("background.enabled"))
-				if enabled != set.BackgroundEnabled() {
+				if switchRow(c, &enabled, i18n.T("background.enabled")) {
 					set.Background = &enabled
 					a.m.SaveSettings()
 				}
@@ -169,62 +194,74 @@ func (a *App) settingsPage(c *ui.Context) {
 
 		section(c, i18n.T("client.title"), func() {
 			ui.Text(c, i18n.T("client.text")).FontSize(12).TextColor(t.TextMuted)
-			ui.Field(c, "Client ID", func() {
-				ui.TextInput(c, &s.clientID).Placeholder("1234-abc.apps.googleusercontent.com").Autocorrect(false).Capitalize(ui.CapitalizeNone)
+			ui.Field(c, i18n.T("client.id"), func() {
+				ui.TextInput(c, &s.clientID).Placeholder(example("1234-abc.apps.googleusercontent.com")).Autocorrect(false).Capitalize(ui.CapitalizeNone)
 			})
-			ui.Field(c, "Client secret", func() {
-				ui.TextInput(c, &s.secret).Password().Placeholder("GOCSPX-…")
+			ui.Field(c, i18n.T("client.secret"), func() {
+				ui.TextInput(c, &s.secret).Password().Placeholder(example("GOCSPX-…"))
 			})
-			ui.Row(c).Gap(8).Wrap().Children(func() {
-				if ui.PrimaryButton(c, i18n.T("save")).Clicked() {
+			if !set.OAuth.Valid() && a.m.Client().Valid() {
+				ui.Text(c, i18n.T("client.builtin")).FontSize(12).TextColor(t.TextMuted)
+			}
+			ui.Row(c).Gap(8).Wrap().AlignItems(ui.Center).Children(func() {
+				if isDesktop() {
+					if labeledButton(c, iconImport, i18n.T("client.import"), false).Clicked() {
+						a.importClient()
+					}
+				}
+				if labeledButton(c, iconExternal, i18n.T("client.docs"), false).Clicked() {
+					openURL(docsOAuth)
+				}
+				ui.Spacer(c)
+				if ui.PrimaryButton(c, i18n.T("save")).Disabled(s.clientID == set.OAuth.ID && s.secret == set.OAuth.Secret).Clicked() {
 					set.OAuth.ID, set.OAuth.Secret = s.clientID, s.secret
 					a.m.SaveSettings()
 					a.toasts = append(a.toasts, ui.Toast{Title: i18n.T("saved"), Type: "success", Timeout: 1500e6})
 				}
-				if isDesktop() {
-					if ui.Button(c, i18n.T("client.import")).Clicked() {
-						a.importClient()
-					}
-				}
 			})
-			if !set.OAuth.Valid() && a.m.Client().Valid() {
-				ui.Text(c, i18n.T("client.builtin")).FontSize(12).TextColor(t.TextMuted)
+			if a.accounts.importFailed {
+				ui.Text(c, i18n.T("client.not_found_text")).FontSize(12).TextColor(t.Warning)
 			}
 		})
 
 		section(c, "Hugging Face", func() {
 			ui.Field(c, i18n.T("settings.hf_token"), func() {
-				ui.TextInput(c, &s.hfToken).Password().Placeholder("hf_…")
+				ui.TextInput(c, &s.hfToken).Password().Placeholder(example("hf_…"))
 			})
 			ui.Text(c, i18n.T("settings.hf_token_help")).FontSize(12).TextColor(t.TextMuted)
 			ui.Field(c, i18n.T("settings.hf_endpoint"), func() {
-				ui.TextInput(c, &s.hfURL).Placeholder("https://huggingface.co").Autocorrect(false).Capitalize(ui.CapitalizeNone)
+				ui.TextInput(c, &s.hfURL).Placeholder(example("https://huggingface.co")).Autocorrect(false).Capitalize(ui.CapitalizeNone)
 			})
-			if ui.PrimaryButton(c, i18n.T("save")).Clicked() {
+			ui.Text(c, i18n.T("settings.hf_mirror_no_token")).FontSize(12).TextColor(t.TextMuted)
+			if u := strings.TrimSpace(s.hfURL); u != "" && !strings.HasPrefix(u, "https://") {
+				ui.Text(c, i18n.T("settings.hf_endpoint_https")).FontSize(12).TextColor(t.Danger)
+			}
+			a.saveRow(c, s.hfToken != s.hfSaved || s.hfURL != set.HFEndpoint, func() {
 				a.m.SetHFToken(s.hfToken)
+				s.hfSaved = s.hfToken
 				set.HFEndpoint = s.hfURL
 				a.m.SaveSettings()
-				a.toasts = append(a.toasts, ui.Toast{Title: i18n.T("saved"), Type: "success", Timeout: 1500e6})
-			}
+			})
 		})
 
 		section(c, i18n.T("settings.advanced"), func() {
+			if switchRow(c, &set.KeepFailed, i18n.T("settings.keep_failed")) {
+				a.m.SaveSettings()
+			}
 			ui.Field(c, i18n.T("settings.cuda_url"), func() {
-				ui.TextInput(c, &s.cudaURL).Placeholder(plugins.DefaultCUDAURL).Autocorrect(false).Capitalize(ui.CapitalizeNone)
+				ui.TextInput(c, &s.cudaURL).Placeholder(example(plugins.DefaultCUDAURL)).Autocorrect(false).Capitalize(ui.CapitalizeNone)
 			})
+			if strings.TrimSpace(s.cudaURL) != "" {
+				ui.Text(c, i18n.T("settings.llama_cuda_unverified")).FontSize(12).TextColor(t.Warning)
+			}
 			ui.Field(c, i18n.T("settings.attempts"), func() {
 				ui.NumberInput(c, &s.attempts, 1, 30, 1).Width(160)
 			})
-			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Switch(c, &set.KeepFailed).Label(i18n.T("settings.keep_failed"))
-				ui.Text(c, i18n.T("settings.keep_failed")).Grow(1).Shrink(1)
-			})
-			if ui.PrimaryButton(c, i18n.T("save")).Clicked() {
+			a.saveRow(c, s.cudaURL != set.LlamaCUDAURL || int(s.attempts) != set.MaxAttempts, func() {
 				set.LlamaCUDAURL = s.cudaURL
 				set.MaxAttempts = int(s.attempts)
 				a.m.SaveSettings()
-				a.toasts = append(a.toasts, ui.Toast{Title: i18n.T("saved"), Type: "success", Timeout: 1500e6})
-			}
+			})
 		})
 
 		section(c, i18n.T("settings.about"), func() {

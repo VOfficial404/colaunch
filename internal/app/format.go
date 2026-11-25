@@ -30,6 +30,25 @@ func duration(d time.Duration) string {
 	return i18n.F("dur.seconds", int(d.Seconds()))
 }
 
+// minutes is a number of minutes as a duration.
+func minutes(m float64) time.Duration { return time.Duration(m * float64(time.Minute)) }
+
+// countdown writes the time left as a countdown reads: "17 s", "2:05",
+// "1:02:05".
+func countdown(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	s := int(d.Round(time.Second).Seconds())
+	switch {
+	case s >= 3600:
+		return fmt.Sprintf("%d:%02d:%02d", s/3600, s/60%60, s%60)
+	case s >= 60:
+		return fmt.Sprintf("%d:%02d", s/60, s%60)
+	}
+	return i18n.F("dur.seconds", s)
+}
+
 func gbFromMB(mb int64) string {
 	return fmt.Sprintf("%.1f GB", float64(mb)/1024)
 }

@@ -20,7 +20,7 @@ Windows · macOS · Linux · Android · iOS —— 一个小巧的原生应用�
 
 - 🚀 **一键部署模型**：填一个 Hugging Face 的 GGUF 仓库，自动在 Colab GPU 上用 llama.cpp 跑起来，直接给你 **OpenAI 兼容 API** 和**网页聊天**；还会按实际分到的显卡，自动挑**放得下的最佳量化版本**（连 KV cache 一起算）。
 - 🖥 **硬件随便选**：CPU、GPU、TPU、高内存，还能设**最低显存**——A100 会随机给 40 GB 或 80 GB，不够就自动退掉重试。
-- 🎯 **抢卡**：Colab 经常没卡可分时，自动一轮一轮重试，按顺序尝试你勾选的备选加速器，还能轮换你的其他账号；抢到后弹系统通知。
+- 🎯 **抢卡**：Colab 经常没卡可分时，自动一轮一轮重试，按顺序尝试你勾选的备选加速器（只用你选定的账号）；抢到后弹系统通知。
 - 💰 **费用保护**：定时自动停止和闲置停止，**由运行时自己执行，关掉应用也照样生效**；另外还有花费上限和余额下限。余额、消耗速度、还能用多久，实时显示。
 - 👥 **多个 Google 账号**：一起管理，随时切换，每个账号的余额都看得到。
 - 🔌 **端口转发**：把运行时上的任意端口接到本机 `127.0.0.1`，走 Colab 自己的连接——不用 ngrok、cloudflared，也不会暴露到公网。
@@ -112,6 +112,7 @@ MYGO_LDFLAGS="-X colaunch/internal/core.defaultClientID=… -X colaunch/internal
 
 ## 说明
 
+- Colab 禁止使用多个账号绕过访问或资源限制；免费额度下，绕过 notebook 界面、主要通过网页界面使用的运行时可能随时被终止（见[限制说明](https://research.google.com/colaboratory/faq.html#disallowed-activities)）。Colaunch 只在你选定的账号上抢卡，也不会伪造活动来阻止 Colab 回收闲置运行时。
 - Colaunch 与 Google 无关。你在上面运行的内容须遵守 Colab 的[服务条款](https://research.google.com/colaboratory/tos_v5.html)和[使用限制](https://research.google.com/colaboratory/faq.html#limitations-and-restrictions)。
 - 计算单元是要花钱的。费用保护能帮上忙，但也请留意 Colab 显示的余额。
 - 刷新令牌保存在系统钥匙串里（Keychain、凭据管理器、Secret Service）。

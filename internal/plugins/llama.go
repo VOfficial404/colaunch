@@ -4,11 +4,13 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"colaunch/internal/agent"
 	"colaunch/internal/colab"
 	"colaunch/internal/hf"
 )
@@ -22,14 +24,54 @@ const LlamaPort = 8765
 
 // DefaultCUDAURL is llama-server built for CUDA by this repository's
 // workflow (.github/workflows/llama-cuda.yml), which saves building it on
-// the runtime.
+// the runtime. It's checked against the sha256 GitHub's API gives for the
+// release's asset, or else the .sha256 the workflow publishes beside it.
 var DefaultCUDAURL = "https://github.com/VOfficial404/colaunch/releases/download/llama-cuda/llama-cuda-linux-x64.tar.gz"
+
+// releaseAsset finds the GitHub release an asset's download address is
+// of: the release in GitHub's API, and the asset's name. ok is false for
+// an address elsewhere.
+func releaseAsset(address string) (api, name string, ok bool) {
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.RawQuery != "" {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 6 || parts[2] != "releases" || parts[3] != "download" {
+		return "", "", false
+	}
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return "", "", false
+		}
+	}
+	api = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
+		url.PathEscape(parts[0]), url.PathEscape(parts[1]), url.PathEscape(parts[4]))
+	return api, parts[5], true
+}
+
+// cudaSource is where llama.cpp for CUDA comes from: the settings', when
+// set, else DefaultCUDAURL. custom tells the script that it may run it
+// unverified, when there's no checksum to check it against.
+func cudaSource(settings map[string]string) (address, api, asset string, custom bool) {
+	address = strings.TrimSpace(settings["llama_cuda_url"])
+	custom = address != "" && address != DefaultCUDAURL
+	if address == "" {
+		address = DefaultCUDAURL
+	}
+	api, asset, _ = releaseAsset(address)
+	return address, api, asset, custom
+}
 
 // Llama deploys a GGUF model from Hugging Face with llama.cpp's server,
 // which has an OpenAI-compatible API and a web page to chat on.
 type Llama struct{}
 
-func init() { Register(Llama{}) }
+func init() {
+	if err := Register(Llama{}); err != nil {
+		panic(err)
+	}
+}
 
 func (Llama) ID() string { return "llama" }
 
@@ -157,24 +199,45 @@ func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
 	if gpuMem > 0 {
 		gpu = "1"
 	}
+	// The token goes to Hugging Face alone, not to a mirror, in a file of
+	// its own that the script reads for the downloads and removes.
+	endpoint, err := hf.CheckEndpoint(hf.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	tokenFile := ""
+	if token := hf.TokenFor(endpoint, env.HFToken); token != "" {
+		if tokenFile, err = agent.PutPrivate(ctx, env.Shell, l.ID(), "hf-token", []byte(token)); err != nil {
+			return nil, err
+		}
+	} else if env.HFToken != "" {
+		env.Log("The Hugging Face token isn't sent to %s, which isn't huggingface.co.", endpoint)
+	}
+	cudaURL, cudaAPI, cudaAsset, custom := cudaSource(env.Settings)
+	if custom && gpu == "1" {
+		env.Log("WARNING: llama.cpp for CUDA comes from %s, set in the settings. Without a checksum published beside it (%s.sha256) it runs unverified.", cudaURL, cudaURL)
+	}
 	alias := strings.TrimSuffix(path.Base(ref.Repo), "-GGUF")
 	alias = strings.TrimSuffix(alias, "-gguf")
 	proj := hf.Projector(files)
 	vars := map[string]string{
-		"REPO":        ref.Repo,
-		"FILES":       strings.Join(choice.Files, " "),
-		"MMPROJ":      proj,
-		"CTX":         strconv.Itoa(ctxLen),
-		"NGL":         ngl,
-		"GPU":         gpu,
-		"PORT":        strconv.Itoa(LlamaPort),
-		"API_KEY":     env.Values["api_key"],
-		"ALIAS":       alias,
-		"PARALLEL":    strconv.Itoa(max(1, atoi(env.Values["parallel"], 1))),
-		"EXTRA":       env.Values["args"],
-		"HF_TOKEN":    env.HFToken,
-		"HF_ENDPOINT": hf.Endpoint,
-		"CUDA_URL":    firstNonEmpty(env.Settings["llama_cuda_url"], DefaultCUDAURL),
+		"REPO":          ref.Repo,
+		"FILES":         strings.Join(choice.Files, " "),
+		"MMPROJ":        proj,
+		"CTX":           strconv.Itoa(ctxLen),
+		"NGL":           ngl,
+		"GPU":           gpu,
+		"PORT":          strconv.Itoa(LlamaPort),
+		"API_KEY":       env.Values["api_key"],
+		"ALIAS":         alias,
+		"PARALLEL":      strconv.Itoa(max(1, atoi(env.Values["parallel"], 1))),
+		"EXTRA":         env.Values["args"],
+		"HF_TOKEN_FILE": tokenFile,
+		"HF_ENDPOINT":   endpoint,
+		"CUDA_URL":      cudaURL,
+		"CUDA_API":      cudaAPI,
+		"CUDA_ASSET":    cudaAsset,
+		"CUDA_CUSTOM":   map[bool]string{true: "1", false: ""}[custom],
 	}
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\n")
@@ -220,13 +283,4 @@ func atoi(s string, def int) int {
 		return def
 	}
 	return n
-}
-
-func firstNonEmpty(s ...string) string {
-	for _, v := range s {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
 }

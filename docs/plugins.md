@@ -40,15 +40,16 @@ plugins folder** opens it, writing an example plugin there when it's empty.
 
 | Field | | |
 |---|---|---|
-| `id` | required | lower-case letters, digits, `-` and `_` |
+| `id` | the folder's name | lower-case letters, digits, `-` and `_`; a plugin whose ID another has, built in (`llama`) or loaded before, isn't loaded |
 | `name`, `description` | | a string, or one per language: `en`, `zh-Hans`, `zh-Hant` |
-| `script` | `run.sh` | the bash script that runs on the runtime |
+| `script` | `run.sh` | the bash script that runs on the runtime: a regular file inside the plugin's folder, not an absolute path, nothing with `..`, and not reached through a symbolic link or junction |
 | `variant` | | the machine it advises: `VARIANT_CPU`, `VARIANT_GPU`, `VARIANT_TPU` |
 | `fields` | | what the Deploy page asks; `kind` is `text`, `password`, `number`, `select` (with `options`) or `switch`; `advanced: true` puts a field under "Advanced" |
 | `ports` | | ports of the runtime to forward to `127.0.0.1`; `kind` is `web`, `openai` or `tcp` |
 | `ready` | a TCP connect to the first port | a bash command that succeeds once the plugin serves |
 | `timeout_minutes` | 30 | how long to wait for `ready` |
 | `model` | | for `openai` ports, the model name the in-app chat sends |
+| `hf_token` | `false` | `true` gives the script the Hugging Face token of the settings, as `HF_TOKEN`; plugins don't get it otherwise |
 
 A port of kind `openai` serves an OpenAI-compatible API under `/v1`: the
 in-app chat talks to it.
@@ -61,7 +62,7 @@ background, its output going to the log Colaunch shows. It gets:
 | Variable | |
 |---|---|
 | `COLAUNCH_<KEY>` | each field's value, its key in upper case: `COLAUNCH_CHECKPOINT` |
-| `HF_TOKEN` | the Hugging Face token of the settings, if any |
+| `HF_TOKEN` | the Hugging Face token of the settings, only with `"hf_token": true` in plugin.json |
 | `COLAUNCH_PLUGIN_DIR` | the plugin's folder on the runtime, also the working directory |
 | `COLAUNCH_HOME` | Colaunch's folder on the runtime, `/content/colaunch` |
 | `COLAUNCH_BUSY` | a file to touch while working without serving, as while downloading, so the idle watchdog leaves the runtime alone |
@@ -86,6 +87,11 @@ exec python ComfyUI/main.py "${args[@]}"
 
 Listen on `127.0.0.1`: the forward reaches it there, and nothing else can.
 Don't use port 8080, which is Colab's own Jupyter server.
+
+Values of `password` fields aren't written to `settings.json` or
+`state.json`: Colaunch keeps them in the system's keychain, as it does
+tokens. The plugin's folder on the runtime, with its script and log, is
+readable by its owner alone.
 
 ### Plugins in Go
 
@@ -112,6 +118,10 @@ many would use are welcome.
 `plugin.json` 的字段、`run.sh` 能用到的环境变量，见上方英文部分的两张表，要点：
 
 - 每个表单字段的值以 `COLAUNCH_<KEY 大写>` 环境变量传给脚本；
+- 脚本默认拿不到 Hugging Face 令牌，plugin.json 里写 `"hf_token": true` 才会以 `HF_TOKEN` 传入；
+- `script` 必须是插件文件夹内的普通文件：不能是绝对路径、不能含 `..`，也不能经由符号链接或目录联接（junction）指到别处；
+- `id` 与已有插件（包括内置的 `llama`）重复的插件不会被加载；
+- `password` 类型字段的值不会写进 `settings.json` 或 `state.json`，而是和令牌一样存在系统钥匙串里；
 - 脚本在运行时上用 bash 后台运行，输出就是 Colaunch 里看到的日志；
 - 输出一行 `@@PHASE 名称@@`，界面会显示当前阶段；
 - 下载、安装这类不提供服务的耗时操作期间，定期 `touch "$COLAUNCH_BUSY"`，闲置看门狗就不会误停运行时；

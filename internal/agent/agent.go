@@ -27,9 +27,54 @@ const MuxReady = "@@COLAUNCH-MUX-READY@@"
 // MuxCommand starts the tunnel.
 const MuxCommand = "python3 -u " + Path + " mux"
 
-// Install puts the agent on the runtime.
+// Install puts the agent on the runtime, in a folder only its owner
+// reads.
 func Install(ctx context.Context, sh *colab.Shell) error {
+	if _, _, err := sh.Run(ctx, "mkdir -p "+Home+" && chmod 700 "+Home); err != nil {
+		return err
+	}
 	return sh.Upload(ctx, Path, Script)
+}
+
+// PluginDir is a plugin's folder on the runtime.
+func PluginDir(id string) string { return Home + "/plugins/" + id }
+
+// agentCmd runs the agent with args and returns its last line.
+func agentCmd(ctx context.Context, sh *colab.Shell, args ...string) (string, error) {
+	cmd := "python3 " + Path
+	for _, a := range args {
+		cmd += " " + shellQuote(a)
+	}
+	out, code, err := sh.Run(ctx, cmd)
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return "", fmt.Errorf("agent: %s: %s", args[0], strings.TrimSpace(out))
+	}
+	return lastLine(out), nil
+}
+
+// PutPrivate puts data in a new file named name, which only its owner
+// reads, in a folder of the plugin's made for it alone, and returns the
+// file's path. The plugin removes it once it's read; stopping the plugin
+// removes what's left.
+func PutPrivate(ctx context.Context, sh *colab.Shell, id, name string, data []byte) (string, error) {
+	dir, err := agentCmd(ctx, sh, "private", id)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(dir, PluginDir(id)+"/") {
+		return "", fmt.Errorf("agent: private: %q", dir)
+	}
+	path := dir + "/" + name
+	if err := sh.Upload(ctx, path, data); err != nil {
+		return "", err
+	}
+	if _, err := agentCmd(ctx, sh, "seal", path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // Watchdog is when the runtime gives itself back. Times are Unix seconds,
@@ -121,7 +166,11 @@ func GetStatus(ctx context.Context, sh *colab.Shell) (*Status, error) {
 
 // RunPlugin uploads a plugin's script and runs it in the background.
 func RunPlugin(ctx context.Context, sh *colab.Shell, id, script string) error {
-	path := fmt.Sprintf("%s/plugins/%s/run.sh", Home, id)
+	// The plugin's folder, only its owner's, before the script goes in.
+	if _, err := agentCmd(ctx, sh, "prepare", id); err != nil {
+		return err
+	}
+	path := PluginDir(id) + "/run.sh"
 	// Scripts written on Windows end their lines with CRLF, which bash
 	// takes for part of each command.
 	script = strings.ReplaceAll(script, "\r\n", "\n")
@@ -154,6 +203,10 @@ func Logs(ctx context.Context, sh *colab.Shell, id string, lines int) (string, e
 func Unassign(ctx context.Context, sh *colab.Shell, reason string) error {
 	_, _, err := sh.Run(ctx, "python3 "+Path+" unassign "+reason)
 	return err
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func lastLine(s string) string {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -124,27 +125,45 @@ func StartLogin(c Client) (*Login, error) {
 	return l, nil
 }
 
+// ErrState is returned for an answer to another sign-in than this one's.
+var ErrState = errors.New("google: the sign-in answered another request")
+
+// serve answers the redirect: a GET of /, Google's answer. One with
+// another state, which anything on this machine could send, is refused
+// and leaves the sign-in waiting for Google's.
 func (l *Login) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	code, err := l.parse(r.URL.Query())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, page, "✗", htmlEscape(err.Error()))
+		if errors.Is(err, ErrState) {
+			return
+		}
 	} else {
 		fmt.Fprintf(w, page, "✓", "Colaunch is signed in. You can close this tab. / 已登录，可以关闭此页面。")
 	}
 	l.finish(code, err)
 }
 
+// parse reads Google's answer. The state comes first: an error or a code
+// in an answer to another request isn't this sign-in's.
 func (l *Login) parse(q url.Values) (string, error) {
+	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(l.state)) != 1 {
+		return "", ErrState
+	}
 	if e := q.Get("error"); e != "" {
 		return "", fmt.Errorf("google: %s", e)
-	}
-	if q.Get("state") != l.state {
-		return "", errors.New("google: the sign-in answered another request")
 	}
 	code := q.Get("code")
 	if code == "" {
@@ -157,21 +176,32 @@ func (l *Login) finish(code string, err error) {
 	l.once.Do(func() { l.code <- result{code, err} })
 }
 
+// ErrPaste is returned for a pasted text that isn't the address the
+// browser landed on, with its state: a bare code isn't taken, as nothing
+// would tell that it answers this sign-in.
+var ErrPaste = errors.New("google: paste the whole address the browser shows")
+
 // Paste finishes the sign-in with the address the browser landed on, for
-// when the loopback server could not answer it.
+// when the loopback server could not answer it. The address must be the
+// redirect's, with the sign-in's state.
 func (l *Login) Paste(address string) error {
-	address = strings.TrimSpace(address)
-	u, err := url.Parse(address)
-	if err != nil || u.RawQuery == "" {
-		// A bare code is fine too.
-		if address != "" && !strings.ContainsAny(address, " /?") {
-			l.finish(address, nil)
-			return nil
-		}
-		return errors.New("google: paste the whole address the browser shows")
+	u, err := url.Parse(strings.TrimSpace(address))
+	if err != nil || u.RawQuery == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ErrPaste
 	}
-	code, err := l.parse(u.Query())
+	want, _ := url.Parse(l.redirect)
+	if u.Host != want.Host || (u.Path != "" && u.Path != "/") {
+		return ErrPaste
+	}
+	q := u.Query()
+	if q.Get("state") == "" {
+		return ErrPaste
+	}
+	code, err := l.parse(q)
 	if err != nil {
+		if !errors.Is(err, ErrState) {
+			l.finish("", err)
+		}
 		return err
 	}
 	l.finish(code, nil)
@@ -227,15 +257,30 @@ func (c Client) Refresh(ctx context.Context, refresh string) (*Token, error) {
 	return tok, nil
 }
 
-// Revoke ends Colaunch's access to an account.
+// Revoke ends Colaunch's access to an account. Google answering anything
+// but 200 is an error: the token may still work.
 func Revoke(ctx context.Context, token string) error {
-	req, _ := http.NewRequestWithContext(ctx, "POST", revokeURL, strings.NewReader(url.Values{"token": {token}}.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", revokeURL, strings.NewReader(url.Values{"token": {token}}.Encode()))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := HTTP.Do(req)
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusOK {
+		var r struct {
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &r) == nil && r.Error != "" {
+			return fmt.Errorf("google: revoking answered %s: %s %s", resp.Status, r.Error, r.Description)
+		}
+		return fmt.Errorf("google: revoking answered %s", resp.Status)
+	}
 	return nil
 }
 

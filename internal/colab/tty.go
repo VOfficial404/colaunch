@@ -4,13 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
+	pathpkg "path"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,10 +146,16 @@ type Shell struct {
 	tty *TTY
 	mu  sync.Mutex // one command at a time
 	n   int
+	// tmp is a folder of the shell's own on the runtime, made on first
+	// use, for commands too long for a line.
+	tmp string
 
 	bmu  sync.Mutex
 	cond *sync.Cond
 	buf  bytes.Buffer
+	// scan is where in buf the marker waited for can start at the
+	// earliest: what is before it was looked through already.
+	scan int
 	err  error
 }
 
@@ -161,8 +169,7 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Shell{tty: tty}
-	s.cond = sync.NewCond(&s.bmu)
+	s := newShell(tty)
 	go s.pump()
 	if err := tty.WriteString(prelude); err != nil {
 		tty.Close()
@@ -180,12 +187,33 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 	return s, nil
 }
 
+func newShell(tty *TTY) *Shell {
+	s := &Shell{tty: tty, tmp: "/tmp/.colaunch-" + randHex(8)}
+	s.cond = sync.NewCond(&s.bmu)
+	return s
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func (s *Shell) pump() {
 	b := make([]byte, 32<<10)
 	for {
 		n, err := s.tty.Read(b)
 		s.bmu.Lock()
-		s.buf.Write(bytes.ReplaceAll(b[:n], []byte("\r"), nil))
+		// Drop the terminal's carriage returns without copying the chunk.
+		for chunk := b[:n]; len(chunk) > 0; {
+			i := bytes.IndexByte(chunk, '\r')
+			if i < 0 {
+				s.buf.Write(chunk)
+				break
+			}
+			s.buf.Write(chunk[:i])
+			chunk = chunk[i+1:]
+		}
 		if err != nil {
 			s.err = err
 		}
@@ -197,34 +225,71 @@ func (s *Shell) pump() {
 	}
 }
 
-// wait waits until re matches what the terminal printed, and drops what
-// it printed up to the end of the match.
-func (s *Shell) wait(ctx context.Context, re *regexp.Regexp) ([]string, error) {
+// find looks for marker in what the terminal printed and wasn't looked
+// through yet, followed, with code, by digits and "@@". It returns where
+// the marker starts and ends, and the digits' value, or -1 while there is
+// none yet. Call it with bmu held.
+func (s *Shell) find(marker []byte, code bool) (start, end, status int) {
+	b := s.buf.Bytes()
+	for {
+		// A marker may have started in the bytes looked through last,
+		// its end not printed yet.
+		from := s.scan
+		i := bytes.Index(b[from:], marker)
+		if i < 0 {
+			s.scan = max(from, len(b)-len(marker)+1)
+			return -1, -1, 0
+		}
+		i += from
+		j := i + len(marker)
+		if !code {
+			return i, j, 0
+		}
+		k := j
+		for k < len(b) && b[k] >= '0' && b[k] <= '9' {
+			k++
+		}
+		if k == len(b) || (k == len(b)-1 && b[k] == '@') {
+			// The rest isn't printed yet.
+			s.scan = i
+			return -1, -1, 0
+		}
+		if k > j && b[k] == '@' && b[k+1] == '@' {
+			status, err := strconv.Atoi(string(b[j:k]))
+			if err == nil {
+				return i, k + 2, status
+			}
+		}
+		// Not a marker after all: look past it.
+		s.scan = i + 1
+	}
+}
+
+// wait waits until the terminal prints marker (and, with code, digits and
+// "@@" after it), and returns what it printed before, and the digits.
+// What it printed up to the marker's end is dropped.
+func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int, error) {
 	stop := context.AfterFunc(ctx, func() {
 		s.bmu.Lock()
 		s.cond.Broadcast()
 		s.bmu.Unlock()
 	})
 	defer stop()
+	m := []byte(marker)
 	s.bmu.Lock()
 	defer s.bmu.Unlock()
 	for {
-		if m := re.FindSubmatchIndex(s.buf.Bytes()); m != nil {
-			b := s.buf.Bytes()
-			groups := make([]string, len(m)/2)
-			for i := range groups {
-				if m[2*i] >= 0 {
-					groups[i] = string(b[m[2*i]:m[2*i+1]])
-				}
-			}
-			s.buf.Next(m[1])
-			return groups, nil
+		if i, j, status := s.find(m, code); i >= 0 {
+			before := bytes.Clone(s.buf.Bytes()[:i])
+			s.buf.Next(j)
+			s.scan = 0
+			return before, status, nil
 		}
 		if s.err != nil {
-			return nil, fmt.Errorf("colab: the terminal closed: %w", s.err)
+			return nil, -1, fmt.Errorf("colab: the terminal closed: %w", s.err)
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, -1, ctx.Err()
 		}
 		s.cond.Wait()
 	}
@@ -240,11 +305,11 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	enc := base64.StdEncoding.EncodeToString([]byte(cmd))
 	if len(enc) > 3000 {
 		// Lines a terminal reads are at most 4095 bytes long.
-		path := fmt.Sprintf("/tmp/.colaunch-cmd-%d.sh", n)
-		if err := s.upload(ctx, path, []byte(cmd)); err != nil {
+		p := fmt.Sprintf("%s/cmd-%d.sh", s.tmp, n)
+		if err := s.upload(ctx, p, []byte(cmd), true); err != nil {
 			return "", -1, err
 		}
-		enc = base64.StdEncoding.EncodeToString([]byte("bash " + path + "; __s=$?; rm -f " + path + "; (exit $__s)"))
+		enc = base64.StdEncoding.EncodeToString([]byte("bash " + p + "; __s=$?; rm -f " + p + "; (exit $__s)"))
 	}
 	// Typed, the markers have quotes inside; printed, they have none. The
 	// command runs in a subshell, so that its exit or cd leaves the shell be.
@@ -252,13 +317,16 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	if err := s.tty.WriteString(line); err != nil {
 		return "", -1, err
 	}
-	re := regexp.MustCompile(fmt.Sprintf(`@@START-%d@@\n([\s\S]*?)@@END-%d:(\d+)@@`, n, n))
-	g, err := s.wait(ctx, re)
+	before, code, err := s.wait(ctx, fmt.Sprintf("@@END-%d:", n), true)
 	if err != nil {
 		return "", -1, err
 	}
-	code, _ := strconv.Atoi(g[2])
-	return g[1], code, nil
+	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
+	i := bytes.LastIndex(before, startMark)
+	if i < 0 {
+		return "", -1, fmt.Errorf("colab: the output of command %d has no start", n)
+	}
+	return string(before[i+len(startMark):]), code, nil
 }
 
 // Upload writes data to path on the runtime, making its directory.
@@ -266,32 +334,50 @@ func (s *Shell) Upload(ctx context.Context, path string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.n++
-	return s.upload(ctx, path, data)
+	return s.upload(ctx, path, data, false)
 }
 
 // upload switches the terminal to raw input, which has no limit on the
-// length of its lines, for head to read exactly the bytes sent.
-func (s *Shell) upload(ctx context.Context, path string, data []byte) error {
+// length of its lines, for head to read exactly the bytes sent. They go to
+// a file of a name no one else has, next to dst, made only if it doesn't
+// exist, and are moved to dst once whole. With private, dst's folder is
+// made for the user alone, and must be theirs.
+func (s *Shell) upload(ctx context.Context, dst string, data []byte, private bool) error {
 	n := s.n
 	enc := base64.StdEncoding.EncodeToString(data)
-	q := shellQuote(path)
-	cmd := fmt.Sprintf("mkdir -p \"$(dirname %s)\"; stty raw -echo; echo @@R\"\"EADY-%d@@; head -c %d | base64 -d > %s.part; __s=$?; stty sane -echo -onlcr; [ $__s = 0 ] && mv %s.part %s; echo \"@@D\"\"ONE-%d:$__s@@\"\n",
-		q, n, len(enc), q, q, q, n)
+	q := shellQuote(dst)
+	dir := shellQuote(pathpkg.Dir(dst))
+	part := shellQuote(dst + ".colaunch-" + randHex(8) + ".part")
+	prep := "mkdir -p " + dir
+	if private {
+		prep = fmt.Sprintf("(umask 077; mkdir -p %s) && [ -O %s ] && [ ! -L %s ]", dir, dir, dir)
+	}
+	cmd := fmt.Sprintf("%s; __s=$?; [ $__s = 0 ] && stty raw -echo; echo \"@@R\"\"EADY-%d:$__s@@\"; "+
+		"if [ $__s = 0 ]; then (set -C; head -c %d | base64 -d > %s); __s=$?; stty sane -echo -onlcr; "+
+		"if [ $__s = 0 ]; then mv -fT %s %s; __s=$?; fi; [ $__s = 0 ] || rm -f %s; fi; "+
+		"echo \"@@D\"\"ONE-%d:$__s@@\"\n",
+		prep, n, len(enc), part, part, q, part, n)
 	if err := s.tty.WriteString(cmd); err != nil {
 		return err
 	}
-	if _, err := s.wait(ctx, regexp.MustCompile(fmt.Sprintf(`@@READY-%d@@`, n))); err != nil {
-		return err
-	}
-	if err := s.tty.WriteString(enc); err != nil {
-		return err
-	}
-	g, err := s.wait(ctx, regexp.MustCompile(fmt.Sprintf(`@@DONE-%d:(\d+)@@`, n)))
+	_, code, err := s.wait(ctx, fmt.Sprintf("@@READY-%d:", n), true)
 	if err != nil {
 		return err
 	}
-	if g[1] != "0" {
-		return fmt.Errorf("colab: writing %s failed", path)
+	if code == 0 {
+		if err := s.tty.WriteString(enc); err != nil {
+			return err
+		}
+	}
+	_, done, err := s.wait(ctx, fmt.Sprintf("@@DONE-%d:", n), true)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("colab: making the folder of %s failed (%d)", dst, code)
+	}
+	if done != 0 {
+		return fmt.Errorf("colab: writing %s failed (%d)", dst, done)
 	}
 	return nil
 }

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"colaunch/internal/colab"
-	"colaunch/internal/google"
 )
 
 var (
@@ -33,58 +32,54 @@ var grabSleep = func(ctx context.Context, d time.Duration) error {
 
 // grabbed is what grab got.
 type grabbed struct {
-	account *Account
-	spec    colab.Spec
-	tries   int
-	waited  time.Duration
+	spec   colab.Spec
+	tries  int
+	waited time.Duration
 }
 
-// grab asks for a runtime as the machine says: each of its accelerators,
-// in order, on each account it may use, round after round while grabbing,
-// until try takes one. try assigns a runtime and keeps it, or gives it back
-// and says why. vramTries is how many runtimes with too little GPU memory
-// to give back before giving up, when not grabbing.
-func (m *Manager) grab(ctx context.Context, s *Session, accounts []*Account, machine Machine, vramTries int,
-	try func(a *Account, spec colab.Spec) error) (grabbed, error) {
+// grab asks the session's account for a runtime as the machine says: each
+// of its accelerators, in order, round after round while grabbing, until
+// try takes one. try assigns a runtime and keeps it, or gives it back and
+// says why. vramTries is how many runtimes with too little GPU memory to
+// give back before giving up, when not grabbing. It asks no other account:
+// Colab's terms forbid using several to get around its limits.
+func (m *Manager) grab(ctx context.Context, s *Session, machine Machine, vramTries int,
+	try func(spec colab.Spec) error) (grabbed, error) {
 	start := time.Now()
 	interval := time.Duration(max(machine.RetrySeconds, 10) * float64(time.Second))
 	attempt, vramMisses := 0, 0
 	for round := 1; ; round++ {
 		var last error
-		for _, a := range accounts {
-		candidates:
-			for _, acc := range machine.Candidates() {
-				spec := machine.Spec()
-				spec.Accelerator = acc
-				attempt++
-				n, r, email := attempt, round, a.Email
-				m.Post(func() {
-					s.Phase, s.Attempt, s.Round, s.Spec, s.Account = PhaseAssigning, n, r, spec, email
-				})
-				m.logf(s, "Assigning %s on %s (try %d)…", spec, email, n)
-				err := try(a, spec)
-				if err == nil {
-					return grabbed{account: a, spec: spec, tries: attempt, waited: time.Since(start)}, nil
-				}
-				if ctx.Err() != nil {
-					return grabbed{}, ctx.Err()
-				}
-				m.logf(s, "✗ %s", errText(err))
-				msg := errText(err)
-				m.Post(func() { s.TryErr = msg })
-				last = err
-				switch {
-				case errors.Is(err, errTooLittleVRAM):
-					vramMisses++
-				case errors.Is(err, colab.ErrUnavailable), errors.Is(err, errConnect), transient(err):
-				case errors.Is(err, colab.ErrTooManyRuntimes), errors.Is(err, colab.ErrQuota):
-					// The account's other accelerators fare no better.
-					break candidates
-				case len(accounts) > 1 && accountErr(err):
-					break candidates
-				default:
-					return grabbed{}, err
-				}
+	candidates:
+		for _, acc := range machine.Candidates() {
+			spec := machine.Spec()
+			spec.Accelerator = acc
+			attempt++
+			n, r := attempt, round
+			m.Post(func() {
+				s.Phase, s.Attempt, s.Round, s.Spec = PhaseAssigning, n, r, spec
+			})
+			m.logf(s, "Assigning %s (try %d)…", spec, n)
+			err := try(spec)
+			if err == nil {
+				return grabbed{spec: spec, tries: attempt, waited: time.Since(start)}, nil
+			}
+			if ctx.Err() != nil {
+				return grabbed{}, ctx.Err()
+			}
+			m.logf(s, "✗ %s", errText(err))
+			msg := errText(err)
+			m.Post(func() { s.TryErr = msg })
+			last = err
+			switch {
+			case errors.Is(err, errTooLittleVRAM):
+				vramMisses++
+			case errors.Is(err, colab.ErrUnavailable), errors.Is(err, errConnect), transient(err):
+			case errors.Is(err, colab.ErrTooManyRuntimes), errors.Is(err, colab.ErrQuota):
+				// The other accelerators fare no better.
+				break candidates
+			default:
+				return grabbed{}, err
 			}
 		}
 		if !machine.Grab {
@@ -120,25 +115,4 @@ func transient(err error) bool {
 	}
 	var ne net.Error
 	return errors.As(err, &ne) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-}
-
-// accountErr reports whether an error is the account's, which another
-// account may not have.
-func accountErr(err error) bool {
-	return errors.Is(err, colab.ErrDenylisted) || errors.Is(err, colab.ErrUnauthorized) || errors.Is(err, google.ErrRevoked)
-}
-
-// grabAccounts are the accounts to try: the active one, then, when the
-// machine may use any, the others that are signed in.
-func (m *Manager) grabAccounts(active *Account, any bool) []*Account {
-	out := []*Account{active}
-	if !any {
-		return out
-	}
-	for _, a := range m.Accounts {
-		if a != active && !a.SignedOut {
-			out = append(out, a)
-		}
-	}
-	return out
 }

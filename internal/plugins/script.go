@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,10 +29,12 @@ import (
 //	  "ports": [{"name": "ComfyUI", "remote": 8188, "local": 8188, "kind": "web"}],
 //	  "ready": "curl -sf http://127.0.0.1:8188/ >/dev/null",
 //	  "timeout_minutes": 30,
-//	  "variant": "VARIANT_GPU"
+//	  "variant": "VARIANT_GPU",
+//	  "hf_token": false
 //	}
 //
-// The script gets each field as COLAUNCH_<KEY>, in upper case.
+// The script gets each field as COLAUNCH_<KEY>, in upper case, and the
+// Hugging Face token as HF_TOKEN only when hf_token is true.
 type Manifest struct {
 	ID          string  `json:"id"`
 	Name        Text    `json:"name"`
@@ -43,6 +46,9 @@ type Manifest struct {
 	Timeout     float64 `json:"timeout_minutes"`
 	Variant     string  `json:"variant"`
 	Model       string  `json:"model"`
+	// HFToken asks for the Hugging Face token of the settings, as
+	// HF_TOKEN. Plugins don't get it otherwise.
+	HFToken bool `json:"hf_token"`
 }
 
 // UnmarshalJSON lets a Text be a plain string.
@@ -69,9 +75,69 @@ type ScriptPlugin struct {
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_\-]{0,40}$`)
 
+// maxPluginFile is the most plugin.json or a script may hold.
+const maxPluginFile = 4 << 20
+
+// readInside reads rel, a regular file of dir. rel must stay inside dir:
+// not absolute, no "..", and through no symbolic link, junction or other
+// reparse point, which could lead out of it.
+func readInside(dir, rel string) ([]byte, error) {
+	bad := func(why string) error {
+		return fmt.Errorf("%s: %q %s", dir, rel, why)
+	}
+	if rel == "" || filepath.IsAbs(rel) || strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, `\`) {
+		return nil, bad("should be a path inside the plugin's folder")
+	}
+	for _, part := range strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return nil, bad("should be a path inside the plugin's folder")
+		}
+	}
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if !filepath.IsLocal(clean) {
+		return nil, bad("should be a path inside the plugin's folder")
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	parts := strings.Split(clean, string(filepath.Separator))
+	for i := range parts {
+		fi, err := root.Lstat(filepath.Join(parts[:i+1]...))
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0:
+			return nil, bad("is a link, which may lead out of the plugin's folder")
+		case i < len(parts)-1 && !fi.IsDir():
+			return nil, bad("isn't a file")
+		case i == len(parts)-1 && !fi.Mode().IsRegular():
+			return nil, bad("isn't a regular file")
+		}
+	}
+	f, err := root.Open(clean)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, bad("isn't a regular file")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxPluginFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxPluginFile {
+		return nil, bad("is too big")
+	}
+	return b, nil
+}
+
 // LoadScriptPlugin reads the plugin in dir.
 func LoadScriptPlugin(dir string) (*ScriptPlugin, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
+	b, err := readInside(dir, "plugin.json")
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +148,13 @@ func LoadScriptPlugin(dir string) (*ScriptPlugin, error) {
 	if m.ID == "" {
 		m.ID = filepath.Base(dir)
 	}
-	if !idPattern.MatchString(m.ID) || m.ID == "llama" {
+	if !idPattern.MatchString(m.ID) {
 		return nil, fmt.Errorf("%s: the id %q should be lower case letters, digits, - and _", dir, m.ID)
 	}
 	if m.Script == "" {
 		m.Script = "run.sh"
 	}
-	script, err := os.ReadFile(filepath.Join(dir, m.Script))
+	script, err := readInside(dir, m.Script)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +181,8 @@ func LoadScriptPlugin(dir string) (*ScriptPlugin, error) {
 }
 
 // LoadDir registers the plugins in the folders of dir, replacing those
-// loaded before, and returns the errors of those it couldn't load.
+// loaded from it before, and returns the errors of those it couldn't load,
+// as those whose ID another plugin, built in or not, has already.
 func LoadDir(dir string) []error {
 	for _, p := range All() {
 		if _, ok := p.(*ScriptPlugin); ok {
@@ -139,7 +206,9 @@ func LoadDir(dir string) []error {
 			errs = append(errs, err)
 			continue
 		}
-		Register(p)
+		if err := Register(p); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", p.Dir, err))
+		}
 	}
 	return errs
 }
@@ -160,19 +229,8 @@ func (p *ScriptPlugin) Validate(ctx context.Context, values map[string]string, _
 }
 
 func (p *ScriptPlugin) Deploy(ctx context.Context, env *Env) (*Result, error) {
-	var b strings.Builder
-	b.WriteString("#!/bin/bash\n")
-	for _, k := range sortedKeys(env.Values) {
-		name := "COLAUNCH_" + strings.ToUpper(regexp.MustCompile(`\W`).ReplaceAllString(k, "_"))
-		fmt.Fprintf(&b, "export %s=%s\n", name, ShellQuote(env.Values[k]))
-	}
-	if env.HFToken != "" {
-		fmt.Fprintf(&b, "export HF_TOKEN=%s\n", ShellQuote(env.HFToken))
-	}
-	b.WriteString("cd \"$COLAUNCH_PLUGIN_DIR\"\n")
-	b.WriteString(p.script)
 	env.Phase("start")
-	if err := runScript(ctx, env, p.ID(), b.String()); err != nil {
+	if err := runScript(ctx, env, p.ID(), p.scriptFor(env)); err != nil {
 		return nil, err
 	}
 	ready := p.Manifest.Ready
@@ -191,6 +249,24 @@ func (p *ScriptPlugin) Deploy(ctx context.Context, env *Env) (*Result, error) {
 	env.Phase("ready")
 	ports := append([]Port(nil), p.Manifest.Ports...)
 	return &Result{Ports: ports, Model: p.Manifest.Model}, nil
+}
+
+// scriptFor is the script that runs on the runtime: the fields as
+// variables, the Hugging Face token only for a plugin that asks for it,
+// then the plugin's script.
+func (p *ScriptPlugin) scriptFor(env *Env) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\n")
+	for _, k := range sortedKeys(env.Values) {
+		name := "COLAUNCH_" + strings.ToUpper(regexp.MustCompile(`\W`).ReplaceAllString(k, "_"))
+		fmt.Fprintf(&b, "export %s=%s\n", name, ShellQuote(env.Values[k]))
+	}
+	if p.Manifest.HFToken && env.HFToken != "" {
+		fmt.Fprintf(&b, "export HF_TOKEN=%s\n", ShellQuote(env.HFToken))
+	}
+	b.WriteString("cd \"$COLAUNCH_PLUGIN_DIR\"\n")
+	b.WriteString(p.script)
+	return b.String()
 }
 
 func (p *ScriptPlugin) Stop(ctx context.Context, sh *colab.Shell) error {

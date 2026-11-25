@@ -19,6 +19,11 @@ type deployState struct {
 	variant  int
 	err      string
 	advanced bool
+	// fieldErr is why a field's value won't do, by plugin and field key.
+	fieldErr map[string]string
+	// grabOpen and guardsOpen unfold the sections that show as a line.
+	grabOpen   bool
+	guardsOpen bool
 }
 
 var variants = []string{"cpu", "gpu", "tpu"}
@@ -38,6 +43,7 @@ func (d *deployState) init(m *core.Manager) {
 		d.form.Plugin = "llama"
 	}
 	d.nums = map[string]*float64{}
+	d.fieldErr = map[string]string{}
 	for i, v := range variants {
 		if v == d.form.Variant {
 			d.variant = i
@@ -62,11 +68,14 @@ func (d *deployState) values(p plugins.Plugin) map[string]string {
 func (a *App) deployPage(c *ui.Context) {
 	d := &a.deploy
 	t := c.Theme()
-	pageScroll(c, i18n.T("nav.deploy"), nil, func() {
-		acct := a.m.Active()
-		if acct == nil {
-			a.noAccountCard(c)
-			return
+	acct := a.m.Active()
+	if acct == nil {
+		pageScroll(c, i18n.T("nav.deploy"), nil, func() { a.onboarding(c) })
+		return
+	}
+	pageFrame(c, i18n.T("nav.deploy"), nil, nil, func() {
+		if isFreeTier(acct) {
+			freeTierNotice(c)
 		}
 		// What and where.
 		p := plugins.Get(d.form.Plugin)
@@ -95,17 +104,97 @@ func (a *App) deployPage(c *ui.Context) {
 		})
 
 		section(c, i18n.T("deploy.hardware"), func() { a.hardware(c, acct) })
-		section(c, i18n.T("deploy.grab"), func() { a.grabForm(c) })
-		section(c, i18n.T("deploy.guards"), func() { a.guardsForm(c, &d.form.Guards, acct) })
+		foldSection(c, "grab", i18n.T("deploy.grab"), grabSummary(d.form.Machine), &d.grabOpen, func() { a.grabForm(c) })
+		foldSection(c, "guards", i18n.T("deploy.guards"), guardsLine(d.form.Guards), &d.guardsOpen, func() { a.guardsForm(c, &d.form.Guards, acct) })
+	}, func() { a.launchBar(c, acct) })
+}
 
-		ui.Row(c).Gap(12).AlignItems(ui.Center).Wrap().Children(func() {
-			if labeledButton(c, iconRocket, i18n.T("deploy.launch"), true).Disabled(acct.SignedOut).Clicked() {
-				a.launch()
-			}
-			ui.Text(c, i18n.F("deploy.on_account", acct.Email)).TextColor(t.TextMuted).FontSize(13)
+// launchBar stays under the form: what is about to happen in a line, and
+// the button that starts it.
+func (a *App) launchBar(c *ui.Context, acct *core.Account) {
+	d := &a.deploy
+	t := c.Theme()
+	d.form.Variant = variants[d.variant]
+	summary := a.launchSummary(acct)
+	noCap := d.form.SpendCap <= 0
+	button := func() {
+		b := labeledButton(c, iconRocket, i18n.T("deploy.launch"), true).Disabled(acct.SignedOut)
+		if b.Clicked() {
+			a.launch()
+		}
+	}
+	capNote := func() {
+		if noCap {
+			ui.Text(c, i18n.T("bar.no_cap")).FontSize(12).Bold().TextColor(t.Warning).Tooltip(i18n.T("bar.no_cap_tip")).SingleLine()
+		}
+	}
+	if isPhone(c) {
+		ui.Text(c, summary).FontSize(12).TextColor(t.TextMuted)
+		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+			capNote()
+			ui.Spacer(c)
+			button()
 		})
-		if d.err != "" {
-			ui.Text(c, d.err).TextColor(t.Danger).Selectable()
+	} else {
+		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, summary).FontSize(12).TextColor(t.TextMuted).SingleLine().Ellipsis("…").Tooltip(summary).Grow(1).Shrink(1)
+			capNote()
+			button()
+		})
+	}
+	if d.err != "" {
+		a.errorNotice(c, "deploy", d.err)
+	}
+}
+
+// launchSummary is the deployment in a line: the accelerators in the
+// order asked, how it grabs, what stops it, the account and about what an
+// hour costs.
+func (a *App) launchSummary(acct *core.Account) string {
+	d := &a.deploy
+	m := d.form.Machine
+	cands := m.Candidates()
+	names := make([]string, len(cands))
+	for i, x := range cands {
+		names[i] = x
+		if x == "NONE" {
+			names[i] = i18n.T("hw.cpu")
+		}
+	}
+	parts := []string{strings.Join(names, " → ")}
+	if m.Grab {
+		parts = append(parts, i18n.F("bar.grab_every", max(m.RetrySeconds, 10)))
+	} else {
+		parts = append(parts, i18n.T("bar.no_grab"))
+	}
+	parts = append(parts, guardsLine(d.form.Guards), acct.Email)
+	return strings.Join(parts, " · ")
+}
+
+// foldSection is a section that shows as its title and a line of what it
+// says until opened.
+func foldSection(c *ui.Context, key, title, summary string, open *bool, fn func()) {
+	t := c.Theme()
+	card(c.Key("fold-"+key), func() {
+		head := ui.Row(c).Gap(10).AlignItems(ui.Center).Focusable().Role(ui.RoleButton).Label(title).Expanded(*open)
+		head.Children(func() {
+			ui.Column(c).Gap(2).Grow(1).Shrink(1).Children(func() {
+				ui.Text(c, title).Bold().FontSize(15)
+				if !*open {
+					ui.Text(c, summary).FontSize(12).TextColor(t.TextMuted)
+				}
+			})
+			icon := iconChevronRight
+			if *open {
+				icon = iconChevronDown
+			}
+			ui.Icon(c, icon).TextColor(t.TextMuted)
+		})
+		if head.Clicked() {
+			*open = !*open
+		}
+		if *open {
+			fn()
 		}
 	})
 }
@@ -116,11 +205,20 @@ func (a *App) launch() {
 	d.form.Variant = variants[d.variant]
 	p := plugins.Get(d.form.Plugin)
 	v := d.values(p)
+	clear(d.fieldErr)
 	for _, f := range p.Fields() {
 		if f.Required && strings.TrimSpace(v[f.Key]) == "" {
-			d.err = i18n.F("deploy.required", f.Label.In(i18n.Lang()))
-			return
+			d.fieldErr[p.ID()+"."+f.Key] = i18n.T("form.required")
+			if d.err == "" {
+				d.err = i18n.F("deploy.required", f.Label.In(i18n.Lang()))
+			}
+			if f.Advanced {
+				d.advanced = true
+			}
 		}
+	}
+	if d.err != "" {
+		return
 	}
 	a.m.Settings.Deploy = d.form
 	a.m.SaveSettings()
@@ -129,6 +227,7 @@ func (a *App) launch() {
 		d.err = err.Error()
 		return
 	}
+	a.runtimes.remember(s.ID, d.form.Machine)
 	a.runtimes.selected = s.ID
 	a.page = pageRuntimes
 }
@@ -140,7 +239,9 @@ func (a *App) pluginFields(c *ui.Context, p plugins.Plugin) {
 	v := d.values(p)
 	lang := i18n.Lang()
 	var advanced []plugins.Field
+	required := false
 	for _, f := range p.Fields() {
+		required = required || f.Required
 		if f.Advanced {
 			advanced = append(advanced, f)
 			continue
@@ -156,57 +257,78 @@ func (a *App) pluginFields(c *ui.Context, p plugins.Plugin) {
 			})
 		})
 	}
-	_ = t
+	if required {
+		ui.Text(c, i18n.T("form.required_note")).FontSize(12).TextColor(t.TextMuted)
+	}
+}
+
+// fieldLabel is a field's label, marked when it must be filled in.
+func fieldLabel(label string, required bool) string {
+	if required {
+		return label + " *"
+	}
+	return label
+}
+
+// example is a placeholder as an example of what to type.
+func example(s string) string {
+	if s == "" {
+		return ""
+	}
+	return i18n.F("form.example", s)
 }
 
 func (a *App) pluginField(c *ui.Context, p plugins.Plugin, f plugins.Field, v map[string]string, lang string) {
 	d := &a.deploy
 	t := c.Theme()
-	{
-		key := p.ID() + "." + f.Key
-		ui.Column(c.Key(key)).Gap(4).Children(func() {
-			ui.Field(c, f.Label.In(lang), func() {
-				switch f.Kind {
-				case plugins.FieldPassword:
-					val := v[f.Key]
-					if ui.TextInput(c, &val).Password().Placeholder(f.Placeholder).Changed() {
-						v[f.Key] = val
-					}
-				case plugins.FieldNumber:
-					n := d.nums[key]
-					if n == nil {
-						x, _ := strconv.ParseFloat(v[f.Key], 64)
-						n = &x
-						d.nums[key] = n
-					}
-					if ui.NumberInput(c, n, 0, 1e7, 1).Changed() {
-						v[f.Key] = strconv.FormatFloat(*n, 'f', -1, 64)
-					}
-				case plugins.FieldSelect:
-					val := v[f.Key]
-					if val == "" && len(f.Options) > 0 {
-						val = f.Options[0]
-					}
-					if ui.Select(c, &val, f.Options).Changed() {
-						v[f.Key] = val
-					}
-				case plugins.FieldSwitch:
-					on := v[f.Key] == "true"
-					if ui.Switch(c, &on).Changed() {
-						v[f.Key] = strconv.FormatBool(on)
-					}
-				default:
-					val := v[f.Key]
-					in := ui.TextInput(c, &val).Placeholder(f.Placeholder).Autocorrect(false).Capitalize(ui.CapitalizeNone)
-					if in.Changed() {
-						v[f.Key] = val
-					}
+	key := p.ID() + "." + f.Key
+	changed := false
+	ui.Column(c.Key(key)).Gap(4).Children(func() {
+		ui.Field(c, fieldLabel(f.Label.In(lang), f.Required), func() {
+			switch f.Kind {
+			case plugins.FieldPassword:
+				val := v[f.Key]
+				if ui.TextInput(c, &val).Password().Placeholder(example(f.Placeholder)).Changed() {
+					v[f.Key], changed = val, true
 				}
-			})
-			if h := f.Help.In(lang); h != "" {
-				ui.Text(c, h).FontSize(12).TextColor(t.TextMuted)
+			case plugins.FieldNumber:
+				n := d.nums[key]
+				if n == nil {
+					x, _ := strconv.ParseFloat(v[f.Key], 64)
+					n = &x
+					d.nums[key] = n
+				}
+				if ui.NumberInput(c, n, 0, 1e7, 1).Changed() {
+					v[f.Key], changed = strconv.FormatFloat(*n, 'f', -1, 64), true
+				}
+			case plugins.FieldSelect:
+				val := v[f.Key]
+				if val == "" && len(f.Options) > 0 {
+					val = f.Options[0]
+				}
+				if ui.Select(c, &val, f.Options).Changed() {
+					v[f.Key], changed = val, true
+				}
+			case plugins.FieldSwitch:
+				on := v[f.Key] == "true"
+				if ui.Switch(c, &on).Changed() {
+					v[f.Key], changed = strconv.FormatBool(on), true
+				}
+			default:
+				val := v[f.Key]
+				in := ui.TextInput(c, &val).Placeholder(example(f.Placeholder)).Autocorrect(false).Capitalize(ui.CapitalizeNone)
+				if in.Changed() {
+					v[f.Key], changed = val, true
+				}
 			}
-		})
+		}).Error(d.fieldErr[key])
+		if h := f.Help.In(lang); h != "" {
+			ui.Text(c, h).FontSize(12).TextColor(t.TextMuted)
+		}
+	})
+	if changed && d.fieldErr[key] != "" {
+		delete(d.fieldErr, key)
+		d.err = ""
 	}
 }
 
@@ -241,10 +363,7 @@ func (a *App) hardware(c *ui.Context, acct *core.Account) {
 		}
 		a.fallbacks(c, options)
 	}
-	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-		ui.Switch(c, &d.form.HighMem).Label(i18n.T("hw.highmem"))
-		ui.Text(c, i18n.T("hw.highmem"))
-	})
+	switchRow(c, &d.form.HighMem, i18n.T("hw.highmem"))
 	if variant == "gpu" {
 		ui.Field(c, i18n.T("hw.min_vram"), func() {
 			ui.NumberInput(c, &d.form.MinVRAM, 0, 192, 1).Width(160)
@@ -300,29 +419,45 @@ func (a *App) grabForm(c *ui.Context) {
 		if d.form.RetrySeconds < 10 {
 			d.form.RetrySeconds = 30
 		}
-		ui.Grid(c).Columns(2).GapX(16).GapY(12).Children(func() {
+		ui.Grid(c).Columns(formCols(c)).GapX(16).GapY(12).Children(func() {
 			ui.Field(c, i18n.T("grab.interval"), func() { ui.NumberInput(c, &d.form.RetrySeconds, 10, 3600, 5) })
 			ui.Field(c, i18n.T("grab.max_wait"), func() { ui.NumberInput(c, &d.form.MaxWait, 0, 10080, 10) })
 		})
 	}
-	if len(a.m.Accounts) > 1 {
-		switchRow(c, &d.form.AnyAccount, i18n.T("grab.any_account"))
-		ui.Text(c, i18n.T("grab.any_account_help")).FontSize(12).TextColor(t.TextMuted)
-	}
 }
 
-// switchRow is a switch with its label after it.
-func switchRow(c *ui.Context, on *bool, label string) {
-	ui.Row(c.Key(label)).Gap(10).AlignItems(ui.Center).Children(func() {
-		ui.Switch(c, on).Label(label)
+// grabSummary is how a machine is grabbed, in a line.
+func grabSummary(m core.Machine) string {
+	if !m.Grab {
+		return i18n.T("grab.s_off")
+	}
+	line := i18n.F("grab.s_on", max(m.RetrySeconds, 10))
+	if m.MaxWait > 0 {
+		return line + " · " + i18n.F("grab.s_max", duration(minutes(m.MaxWait)))
+	}
+	return line + " · " + i18n.T("grab.s_forever")
+}
+
+// switchRow is a switch with its label after it; a click anywhere on the
+// row flips it. It reports whether it changed.
+func switchRow(c *ui.Context, on *bool, label string) bool {
+	changed := false
+	row := ui.Row(c.Key(label)).Gap(10).AlignItems(ui.Center).PaddingY(4)
+	row.Children(func() {
+		changed = ui.Switch(c, on).Label(label).Changed()
 		ui.Text(c, label).Grow(1).Shrink(1)
 	})
+	if !changed && row.Clicked() {
+		*on = !*on
+		changed = true
+	}
+	return changed
 }
 
 // guardsForm edits the limits on what a runtime costs.
 func (a *App) guardsForm(c *ui.Context, g *core.Guards, acct *core.Account) {
 	t := c.Theme()
-	ui.Grid(c).Columns(2).GapX(16).GapY(12).Children(func() {
+	ui.Grid(c).Columns(formCols(c)).GapX(16).GapY(12).Children(func() {
 		ui.Field(c, i18n.T("guard.stop_after"), func() { ui.NumberInput(c, &g.StopAfter, 0, 100000, 15) })
 		ui.Field(c, i18n.T("guard.idle"), func() { ui.NumberInput(c, &g.IdleStop, 0, 100000, 5) })
 		ui.Field(c, i18n.T("guard.cap"), func() { ui.NumberInput(c, &g.SpendCap, 0, 100000, 1) })
@@ -334,23 +469,6 @@ func (a *App) guardsForm(c *ui.Context, g *core.Guards, acct *core.Account) {
 	}
 }
 
-func (a *App) noAccountCard(c *ui.Context) {
-	t := c.Theme()
-	card(c, func() {
-		ui.Text(c, i18n.T("account.welcome")).FontSize(17).Bold()
-		ui.Text(c, i18n.T("account.welcome_text")).TextColor(t.TextMuted)
-		if labeledButton(c, iconPlus, i18n.T("account.add"), true).Clicked() {
-			a.page = pageAccounts
-			a.startLogin()
-		}
-	})
-}
-
 func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }

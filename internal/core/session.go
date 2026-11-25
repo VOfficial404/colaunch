@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"colaunch/internal/agent"
@@ -44,7 +46,6 @@ type Session struct {
 	Err         string
 	Log         []LogLine
 	Status      *agent.Status
-	Resources   *colab.Resources
 	Forwards    []*ForwardState
 	// StopReason is why it stopped: "user", "schedule", "idle",
 	// "budget", "floor", "gone" or "failed".
@@ -58,14 +59,43 @@ type Session struct {
 	Grabbing  bool
 	StoppedAt time.Time
 
+	// sentWD is the watchdog the runtime was last given, nil for none
+	// known; main thread.
+	sentWD *agent.Watchdog
+
 	// What goroutines use, behind mu.
-	mu     sync.Mutex
+	mu sync.Mutex
+	// rid is RuntimeID for goroutines: the main thread's may lag behind.
+	rid    string
 	conn   *colab.Connection
 	shell  *colab.Shell
 	mux    *tunnel.Mux
 	fwds   []*tunnel.Forward
 	cancel context.CancelFunc
-	busy   sync.Mutex // one watch at a time
+	// dialing is the tunnel being opened, which others wait for; gen
+	// counts closeConns, so that a tunnel opened across one is dropped.
+	dialing *muxDial
+	gen     int
+	busy    sync.Mutex // one watch at a time
+}
+
+// muxDial is a tunnel being opened.
+type muxDial struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	mux    *tunnel.Mux
+	err    error
+}
+
+// muxIdle is how long a tunnel without connections stays open; the next
+// connection opens it again.
+const muxIdle = 5 * time.Minute
+
+// runtimeID is the session's runtime, for goroutines.
+func (s *Session) runtimeID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rid
 }
 
 // LogLine is a line of a session's log.
@@ -107,7 +137,7 @@ func (f *ForwardState) URL() string {
 	return "http://" + f.f.Local + f.Port.Path
 }
 
-func (s *Session) init() {}
+func (s *Session) init() { s.rid = s.RuntimeID }
 
 // Ended reports whether the session's runtime is gone.
 func (s *Session) Ended() bool {
@@ -157,12 +187,58 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// logBatch is how long log lines wait to be shown together, one redraw
+// for all.
+const logBatch = 100 * time.Millisecond
+
+// workState is what the manager's goroutines share.
+type workState struct {
+	mu   sync.Mutex
+	logs []pendingLog // behind mu
+	// background is true while the app is in the background; wake tells
+	// the loop it changed.
+	background atomic.Bool
+	wakeOnce   sync.Once
+	wake       chan struct{}
+}
+
+type pendingLog struct {
+	s    *Session
+	line LogLine
+}
+
+func (w *workState) wakeCh() chan struct{} {
+	w.wakeOnce.Do(func() { w.wake = make(chan struct{}, 1) })
+	return w.wake
+}
+
 func (m *Manager) logf(s *Session, format string, args ...any) {
 	line := LogLine{Time: time.Now(), Text: fmt.Sprintf(format, args...)}
+	w := &m.work
+	w.mu.Lock()
+	w.logs = append(w.logs, pendingLog{s, line})
+	first := len(w.logs) == 1
+	w.mu.Unlock()
+	if first {
+		time.AfterFunc(logBatch, m.flushLogs)
+	}
+}
+
+// flushLogs shows the log lines waiting, with those that came while its
+// Post waited.
+func (m *Manager) flushLogs() {
 	m.Post(func() {
-		s.Log = append(s.Log, line)
-		if len(s.Log) > 2000 {
-			s.Log = s.Log[len(s.Log)-1500:]
+		w := &m.work
+		w.mu.Lock()
+		logs := w.logs
+		w.logs = nil
+		w.mu.Unlock()
+		for _, l := range logs {
+			s := l.s
+			s.Log = append(s.Log, l.line)
+			if len(s.Log) > 2000 {
+				s.Log = s.Log[len(s.Log)-1500:]
+			}
 		}
 	})
 }
@@ -212,7 +288,9 @@ func (m *Manager) Launch(form DeployForm) (*Session, error) {
 	s.cancel = cancel
 	m.Sessions = append(m.Sessions, s)
 	s.Grabbing = form.Machine.Grab
-	go m.launch(ctx, s, m.grabAccounts(a, form.Machine.AnyAccount), p, form.Machine, m.Settings.MaxAttempts)
+	// The active account only: Colab's terms forbid using several to get
+	// around its limits; there is no option to.
+	go m.launch(ctx, s, a, p, form.Machine, m.Settings.MaxAttempts)
 	return s, nil
 }
 
@@ -221,9 +299,7 @@ func (m *Manager) fail(s *Session, a *Account, err error) {
 		return
 	}
 	m.logf(s, "✗ %s", errText(err))
-	s.mu.Lock()
-	id := s.RuntimeID
-	s.mu.Unlock()
+	id := s.runtimeID()
 	keep := m.Settings.KeepFailed && id != ""
 	if id != "" && !keep {
 		m.logf(s, "Giving the runtime back, so that it costs nothing more.")
@@ -263,8 +339,7 @@ func (s *Session) Title() string {
 	return name
 }
 
-func (m *Manager) launch(ctx context.Context, s *Session, accounts []*Account, p plugins.Plugin, machine Machine, vramTries int) {
-	a := accounts[0]
+func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.Plugin, machine Machine, vramTries int) {
 	m.logf(s, "%s · %s · %s", p.Name().In(m.Lang()), s.Spec, a.Email)
 	hw, err := p.Validate(ctx, s.Values, m.HFToken())
 	if err != nil {
@@ -281,13 +356,13 @@ func (m *Manager) launch(ctx context.Context, s *Session, accounts []*Account, p
 	}
 	var sh *colab.Shell
 	var st *agent.Status
-	try := func(a *Account, spec colab.Spec) error {
+	try := func(spec colab.Spec) error {
 		rt, err := a.Client.CreateRuntime(ctx, spec)
 		if err != nil {
 			return err
 		}
 		s.mu.Lock()
-		s.RuntimeID = rt.ID()
+		s.rid = rt.ID()
 		s.conn = rt.Connection
 		s.mu.Unlock()
 		m.Post(func() { s.RuntimeID = rt.ID(); m.saveState() })
@@ -299,7 +374,7 @@ func (m *Manager) launch(ctx context.Context, s *Session, accounts []*Account, p
 			}
 			cancel()
 			s.mu.Lock()
-			s.RuntimeID = ""
+			s.rid = ""
 			s.mu.Unlock()
 			m.Post(func() { s.RuntimeID = ""; m.saveState() })
 		}
@@ -327,12 +402,11 @@ func (m *Manager) launch(ctx context.Context, s *Session, accounts []*Account, p
 		sh, st = sh2, st2
 		return nil
 	}
-	got, err := m.grab(ctx, s, accounts, machine, vramTries, try)
+	got, err := m.grab(ctx, s, machine, vramTries, try)
 	if err != nil {
 		m.fail(s, a, err)
 		return
 	}
-	a = got.account
 	m.Post(func() {
 		if a.Quota != nil {
 			s.StartBalance = a.Quota.Balance
@@ -416,12 +490,13 @@ func (m *Manager) connect(ctx context.Context, s *Session, conn *colab.Connectio
 		return nil, nil, err
 	}
 	s.mu.Lock()
-	if s.shell != nil {
-		s.shell.Close()
-	}
+	old := s.shell
 	s.shell = sh
 	s.conn = conn
 	s.mu.Unlock()
+	if old != nil && old != sh {
+		old.Close()
+	}
 	return sh, st, nil
 }
 
@@ -451,16 +526,24 @@ func watchdogFor(s *sessionRecord, q *colab.Quota, now time.Time) agent.Watchdog
 
 func (m *Manager) applyWatchdog(ctx context.Context, s *Session, a *Account, sh *colab.Shell) error {
 	var w agent.Watchdog
+	var guarded bool
 	done := make(chan struct{})
-	m.Post(func() {
+	m.peek(func() {
 		w = watchdogFor(&s.sessionRecord, a.Quota, time.Now())
+		guarded = s.Guards.Any()
 		close(done)
 	})
-	<-done
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	if err := agent.SetWatchdog(ctx, sh, w); err != nil {
+		m.peek(func() { s.sentWD = nil })
 		return err
 	}
-	if !s.Guards.Any() {
+	m.peek(func() { s.sentWD = &w })
+	if !guarded {
 		return nil
 	}
 	var parts []string
@@ -494,21 +577,42 @@ func (m *Manager) checkBalance(a *Account) {
 			continue
 		}
 		if s.Guards.SpendCap > 0 || s.Guards.BalanceFloor > 0 {
-			// The rate may have changed: tell the watchdog.
+			// The rate may have changed: tell the watchdog, unless all
+			// that moved is the budget's end, by less than a minute.
 			w := watchdogFor(&s.sessionRecord, q, time.Now())
+			if sameWatchdog(s.sentWD, w) {
+				continue
+			}
+			s.sentWD = &w
 			go func() {
 				s.mu.Lock()
 				sh := s.shell
 				s.mu.Unlock()
 				if sh == nil {
+					m.peek(func() { s.sentWD = nil })
 					return
 				}
 				ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
 				defer cancel()
-				agent.SetWatchdog(ctx, sh, w)
+				if agent.SetWatchdog(ctx, sh, w) != nil {
+					m.peek(func() { s.sentWD = nil })
+				}
 			}()
 		}
 	}
+}
+
+// sameWatchdog reports whether a runtime given old needs w no more: they
+// are the same but for a budget's end less than a minute apart.
+func sameWatchdog(old *agent.Watchdog, w agent.Watchdog) bool {
+	if old == nil || old.StopAt != w.StopAt || old.IdleMinutes != w.IdleMinutes {
+		return false
+	}
+	if (old.BudgetAt == 0) != (w.BudgetAt == 0) {
+		return false
+	}
+	d := old.BudgetAt - w.BudgetAt
+	return d > -60 && d < 60
 }
 
 // Stop gives a session's runtime back.
@@ -523,7 +627,7 @@ func (m *Manager) Stop(s *Session, reason string) {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	id := s.RuntimeID
+	id := s.rid
 	s.mu.Unlock()
 	go func() {
 		s.closeConns()
@@ -552,46 +656,94 @@ func (m *Manager) Stop(s *Session, reason string) {
 	}()
 }
 
+// closeConns closes the session's terminals and forwards, and stops the
+// tunnel being opened, if one is. What may wait on the network is done
+// without mu.
 func (s *Session) closeConns() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, f := range s.fwds {
+	fwds, mux, sh, d := s.fwds, s.mux, s.shell, s.dialing
+	s.fwds, s.mux, s.shell, s.dialing = nil, nil, nil, nil
+	s.gen++
+	s.mu.Unlock()
+	if d != nil {
+		d.cancel()
+	}
+	// The tunnel first: its streams then close without a word to it.
+	if mux != nil {
+		mux.Close()
+	}
+	for _, f := range fwds {
 		f.Close()
 	}
-	s.fwds = nil
-	if s.mux != nil {
-		s.mux.Close()
-		s.mux = nil
-	}
-	if s.shell != nil {
-		s.shell.Close()
-		s.shell = nil
+	if sh != nil {
+		sh.Close()
 	}
 }
 
-// dialMux returns the session's tunnel, opening it if it isn't open.
+// dialMux returns the session's tunnel, opening it if it isn't open. It
+// doesn't hold mu while it dials, and callers at the same time share one
+// dial.
 func (s *Session) dialMux() (*tunnel.Mux, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.mux != nil {
 		select {
 		case <-s.mux.Done():
 			s.mux = nil
 		default:
-			return s.mux, nil
+			m := s.mux
+			s.mu.Unlock()
+			return m, nil
 		}
 	}
-	if s.conn == nil {
+	if d := s.dialing; d != nil {
+		s.mu.Unlock()
+		<-d.done
+		return d.mux, d.err
+	}
+	conn := s.conn
+	if conn == nil {
+		s.mu.Unlock()
 		return nil, errors.New("not connected")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	tty, r, err := colab.Stream(ctx, s.conn, agent.MuxCommand, agent.MuxReady)
-	if err != nil {
-		return nil, err
+	d := &muxDial{done: make(chan struct{}), cancel: cancel}
+	s.dialing = d
+	gen := s.gen
+	s.mu.Unlock()
+
+	tty, r, err := streamMux(ctx, conn)
+	cancel()
+	var mux *tunnel.Mux
+	if err == nil {
+		mux = tunnel.New(tty, r)
+		mux.SetIdleTimeout(muxIdle)
 	}
-	s.mux = tunnel.New(tty, r)
-	return s.mux, nil
+	s.mu.Lock()
+	if s.dialing == d {
+		s.dialing = nil
+	}
+	stale := s.gen != gen
+	if mux != nil && !stale {
+		s.mux = mux
+	}
+	s.mu.Unlock()
+	if mux != nil && stale {
+		// The session closed while it dialed.
+		mux.Close()
+		mux, err = nil, tunnel.ErrClosed
+	}
+	d.mux, d.err = mux, err
+	close(d.done)
+	return mux, err
+}
+
+// streamMux starts the agent's mux on a terminal; tests replace it.
+var streamMux = func(ctx context.Context, conn *colab.Connection) (tunnel.Transport, *bufio.Reader, error) {
+	tty, r, err := colab.Stream(ctx, conn, agent.MuxCommand, agent.MuxReady)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tty, r, nil
 }
 
 // forwardAll forwards ports of the runtime to 127.0.0.1, falling back to
@@ -636,6 +788,14 @@ func (m *Manager) AddForward(s *Session, remote, local int, name string) {
 // RemoveForward stops a forward the user added.
 func (m *Manager) RemoveForward(s *Session, f *ForwardState) {
 	if f.f != nil {
+		s.mu.Lock()
+		for i, x := range s.fwds {
+			if x == f.f {
+				s.fwds = append(s.fwds[:i], s.fwds[i+1:]...)
+				break
+			}
+		}
+		s.mu.Unlock()
 		f.f.Close()
 	}
 	for i, x := range s.Forwards {
@@ -657,7 +817,7 @@ func (m *Manager) RemoveForward(s *Session, f *ForwardState) {
 // when it has none or its connection is about to expire.
 func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.Shell, error) {
 	s.mu.Lock()
-	sh, conn := s.shell, s.conn
+	sh, conn, id := s.shell, s.conn, s.rid
 	s.mu.Unlock()
 	if sh != nil && conn != nil && time.Until(conn.ExpireTime) > 5*time.Minute {
 		select {
@@ -666,7 +826,10 @@ func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.S
 			return sh, nil
 		}
 	}
-	rt, err := a.Client.Runtime(ctx, s.RuntimeID)
+	if id == "" {
+		return nil, errors.New("the session has no runtime")
+	}
+	rt, err := a.Client.Runtime(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -688,17 +851,13 @@ func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.S
 	return sh, err
 }
 
-// watch looks at a running session's runtime: is it still there, what
-// does it use, did its watchdog stop it.
-func (m *Manager) watch(s *Session) {
+// watch looks at a running session's runtime, of account a: is it still
+// there, what does it use, did its watchdog stop it.
+func (m *Manager) watch(s *Session, a *Account) {
 	if !s.busy.TryLock() {
 		return
 	}
 	defer s.busy.Unlock()
-	a := m.Account(s.Account)
-	if a == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(m.ctx, 90*time.Second)
 	defer cancel()
 	sh, err := m.shellOf(ctx, s, a)
@@ -713,16 +872,9 @@ func (m *Manager) watch(s *Session) {
 	if err != nil {
 		return
 	}
-	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-	res, _ := a.Client.Resources(ctx, conn)
 	m.Post(func() {
 		s.Status = st
 		s.Err = ""
-		if res != nil {
-			s.Resources = res
-		}
 		// Reconnecting after a restart failed before its forwards: make
 		// them now that the runtime answers.
 		if len(s.Forwards) == 0 && s.Result != nil && len(s.Result.Ports)+len(s.Extra) > 0 {
@@ -752,15 +904,15 @@ func (m *Manager) gone(s *Session) {
 
 // reattach finds a kept session's runtime after the app restarted, and
 // forwards its ports again.
-func (m *Manager) reattach(s *Session) {
-	a := m.Account(s.Account)
-	if a == nil || s.RuntimeID == "" {
+func (m *Manager) reattach(s *Session, a *Account) {
+	id := s.runtimeID()
+	if a == nil || id == "" {
 		m.Post(func() { s.Phase = PhaseStopped; s.StopReason = "gone"; m.saveState() })
 		return
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
 	defer cancel()
-	rt, err := a.Client.Runtime(ctx, s.RuntimeID)
+	rt, err := a.Client.Runtime(ctx, id)
 	if errors.Is(err, colab.ErrNotFound) {
 		m.gone(s)
 		return
@@ -774,29 +926,40 @@ func (m *Manager) reattach(s *Session) {
 		m.Post(func() { s.Phase = PhaseRunning; s.Err = errText(err) })
 		return
 	}
-	m.Post(func() { s.Status = st; s.Err = "" })
-	var ports []plugins.Port
-	if s.Result != nil {
-		ports = s.Result.Ports
+	var ports, extra []plugins.Port
+	done := make(chan struct{})
+	m.Post(func() {
+		s.Status, s.Err = st, ""
+		if s.Result != nil {
+			ports = s.Result.Ports
+		}
+		extra = append(extra, s.Extra...)
+		close(done)
+	})
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return
 	}
-	m.forwardAll(s, ports, s.Extra)
+	m.forwardAll(s, ports, extra)
 	m.phase(s, PhaseRunning)
-	m.logf(s, "Reconnected to runtime %s.", s.RuntimeID)
+	m.logf(s, "Reconnected to runtime %s.", id)
 }
 
 // Logs fetches the end of the session's plugin log from the runtime.
 func (m *Manager) Logs(s *Session, done func(string, error)) {
+	a := m.Account(s.Account)
+	if a == nil {
+		return
+	}
+	plugin := s.Plugin
 	go func() {
-		a := m.Account(s.Account)
-		if a == nil {
-			return
-		}
 		ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
 		defer cancel()
 		sh, err := m.shellOf(ctx, s, a)
 		var out string
 		if err == nil {
-			out, err = agent.Logs(ctx, sh, s.Plugin, 300)
+			out, err = agent.Logs(ctx, sh, plugin, 300)
 		}
 		m.Post(func() { done(out, err) })
 	}()

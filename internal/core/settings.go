@@ -7,6 +7,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -82,8 +83,6 @@ type Machine struct {
 	RetrySeconds float64 `json:"retry_seconds"`
 	// MaxWait gives up grabbing after so many minutes, 0 for never.
 	MaxWait float64 `json:"max_wait"`
-	// AnyAccount asks on the other accounts too.
-	AnyAccount bool `json:"any_account"`
 }
 
 // Candidates are the accelerators to ask for, in order.
@@ -208,4 +207,177 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// The values of password fields, as the llama plugin's API key, are kept in
+// Secrets, not in settings.json or state.json: a plugin's, as last typed,
+// under "plugin/<plugin>/<field>"; a session's together under
+// "session/<id>".
+
+func settingSecretKey(plugin, field string) string { return "plugin/" + plugin + "/" + field }
+
+func sessionSecretKey(id string) string { return "session/" + id }
+
+// passwordFields are the keys of a plugin's password fields, none for a
+// plugin that isn't loaded.
+func passwordFields(plugin string) []string {
+	p := plugins.Get(plugin)
+	if p == nil {
+		return nil
+	}
+	var keys []string
+	for _, f := range p.Fields() {
+		if f.Kind == plugins.FieldPassword {
+			keys = append(keys, f.Key)
+		}
+	}
+	return keys
+}
+
+// putSecret keeps value under key, writing only when it changed, and
+// deletes the key for an empty value.
+func putSecret(sec Secrets, key string, value []byte) error {
+	old, _ := sec.Get(key)
+	if len(value) == 0 {
+		if len(old) == 0 {
+			return nil
+		}
+		return sec.Delete(key)
+	}
+	if string(old) == string(value) {
+		return nil
+	}
+	return sec.Set(key, value)
+}
+
+// splitSecret takes the password fields out of a copy of values.
+func splitSecret(plugin string, values map[string]string) (public, secret map[string]string) {
+	keys := passwordFields(plugin)
+	if values == nil {
+		return nil, nil
+	}
+	public = make(map[string]string, len(values))
+	for k, v := range values {
+		public[k] = v
+	}
+	for _, k := range keys {
+		if v, ok := public[k]; ok {
+			delete(public, k)
+			if v != "" {
+				if secret == nil {
+					secret = map[string]string{}
+				}
+				secret[k] = v
+			}
+		}
+	}
+	return public, secret
+}
+
+// settingsToSave returns the settings as settings.json keeps them, without
+// password values, which it keeps in Secrets.
+func (m *Manager) settingsToSave() Settings {
+	out := m.Settings
+	out.Deploy.Values = make(map[string]map[string]string, len(m.Settings.Deploy.Values))
+	for plugin, values := range m.Settings.Deploy.Values {
+		public, secret := splitSecret(plugin, values)
+		out.Deploy.Values[plugin] = public
+		for _, k := range passwordFields(plugin) {
+			if err := putSecret(m.Secrets, settingSecretKey(plugin, k), []byte(secret[k])); err != nil {
+				log.Printf("settings: keeping %s's %s: %v", plugin, k, err)
+			}
+		}
+	}
+	return out
+}
+
+// loadSettingSecrets puts the password values kept in Secrets back in the
+// settings, and reports whether settings.json had any, written before
+// they were kept apart, to write it again without them.
+func (m *Manager) loadSettingSecrets() (plain bool) {
+	for _, p := range plugins.All() {
+		for _, k := range passwordFields(p.ID()) {
+			values := m.Settings.Deploy.Values[p.ID()]
+			if v := values[k]; v != "" {
+				plain = true
+				continue
+			}
+			b, err := m.Secrets.Get(settingSecretKey(p.ID(), k))
+			if err != nil || len(b) == 0 {
+				continue
+			}
+			if values == nil {
+				values = map[string]string{}
+				m.Settings.Deploy.Values[p.ID()] = values
+			}
+			values[k] = string(b)
+		}
+	}
+	return plain
+}
+
+// sessionSecret is what a session keeps in Secrets.
+type sessionSecret struct {
+	Values map[string]string `json:"values,omitempty"`
+	APIKey string            `json:"api_key,omitempty"`
+}
+
+// recordToSave returns a session as state.json keeps it, without the
+// values of password fields and the API key, which it keeps in Secrets.
+func (m *Manager) recordToSave(r sessionRecord) sessionRecord {
+	var sec sessionSecret
+	r.Values, sec.Values = splitSecret(r.Plugin, r.Values)
+	if r.Result != nil {
+		res := *r.Result
+		sec.APIKey, res.APIKey = res.APIKey, ""
+		r.Result = &res
+	}
+	if r.ID == "" {
+		return r
+	}
+	var b []byte
+	if len(sec.Values) > 0 || sec.APIKey != "" {
+		b, _ = json.Marshal(sec)
+	}
+	if err := putSecret(m.Secrets, sessionSecretKey(r.ID), b); err != nil {
+		log.Printf("state: keeping session %s's secrets: %v", r.ID, err)
+	}
+	return r
+}
+
+// loadSessionSecrets puts a session's secrets back, and reports whether
+// state.json had them, written before they were kept apart.
+func (m *Manager) loadSessionSecrets(r *sessionRecord) (plain bool) {
+	for _, k := range passwordFields(r.Plugin) {
+		if r.Values[k] != "" {
+			plain = true
+		}
+	}
+	if r.Result != nil && r.Result.APIKey != "" {
+		plain = true
+	}
+	if r.ID == "" {
+		return plain
+	}
+	b, err := m.Secrets.Get(sessionSecretKey(r.ID))
+	if err != nil || len(b) == 0 {
+		return plain
+	}
+	var sec sessionSecret
+	if err := json.Unmarshal(b, &sec); err != nil {
+		log.Printf("state: session %s's secrets: %v", r.ID, err)
+		return plain
+	}
+	for k, v := range sec.Values {
+		if r.Values == nil {
+			r.Values = map[string]string{}
+		}
+		if r.Values[k] == "" {
+			r.Values[k] = v
+		}
+	}
+	if r.Result != nil && r.Result.APIKey == "" {
+		r.Result.APIKey = sec.APIKey
+	}
+	return plain
 }

@@ -6,6 +6,11 @@
 #
 # It links CUDA's libraries dynamically: Colab's runtimes have them. Where
 # the binary doesn't run, the plugin builds llama.cpp itself.
+#
+# The plugin checks the archive against the sha256 GitHub's API gives for
+# the release's asset, or else against the .sha256 published beside it.
+# The build runs with read-only permissions; only the publish job, which
+# runs nothing of llama.cpp's, may write the release.
 name: llama.cpp for CUDA
 
 on:
@@ -18,19 +23,34 @@ on:
         default: master
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container: nvidia/cuda:12.6.3-devel-ubuntu22.04
+    permissions:
+      contents: read
     steps:
       - name: Install the tools
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake ninja-build ca-certificates curl
       - name: Check out llama.cpp
-        run: git clone --depth 1 --branch "${{ inputs.ref || 'master' }}" https://github.com/ggml-org/llama.cpp src
+        env:
+          # The input goes through the environment, never into the script.
+          REF: ${{ inputs.ref || 'master' }}
+        run: |
+          set -eu
+          # A tag or a branch: letters, digits, . _ - and /, as git allows
+          # them, and nothing an option or a revision range could read.
+          if ! printf '%s' "$REF" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$' \
+            || printf '%s' "$REF" | grep -Eq '\.\.|//|/$|\.lock$|@\{' \
+            || ! git check-ref-format --allow-onelevel "$REF"; then
+            echo "::error::not a tag or branch name: $REF"
+            exit 1
+          fi
+          git clone --depth 1 --branch "$REF" https://github.com/ggml-org/llama.cpp src
       - name: Build
         run: |
           cmake -S src -B build -G Ninja \
@@ -49,18 +69,38 @@ jobs:
           cp build/bin/llama-server out/
           (cd src && git rev-parse --short HEAD) > out/VERSION
           tar -czf llama-cuda-linux-x64.tar.gz -C out .
+          sha256sum llama-cuda-linux-x64.tar.gz > llama-cuda-linux-x64.tar.gz.sha256
           ls -la llama-cuda-linux-x64.tar.gz
+          cat llama-cuda-linux-x64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-cuda
+          path: |
+            llama-cuda-linux-x64.tar.gz
+            llama-cuda-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: llama-cuda
+      - name: Check the checksum
+        run: sha256sum -c llama-cuda-linux-x64.tar.gz.sha256
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          curl -fsSL https://github.com/cli/cli/releases/download/v2.83.0/gh_2.83.0_linux_amd64.tar.gz | tar -xz
-          gh=./gh_2.83.0_linux_amd64/bin/gh
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if ! $gh release view llama-cuda --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            $gh release create llama-cuda --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+          if ! gh release view llama-cuda --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create llama-cuda --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
               --title "llama.cpp for CUDA (used by the llama plugin)" \
-              --notes "llama-server built for CUDA on Colab's Ubuntu 22.04, which the llama plugin downloads. Rebuilt weekly." \
+              --notes "llama-server built for CUDA on Colab's Ubuntu 22.04, which the llama plugin downloads and checks against its sha256. Rebuilt weekly." \
               --target "$GITHUB_SHA"
           fi
-          $gh release upload llama-cuda llama-cuda-linux-x64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload llama-cuda llama-cuda-linux-x64.tar.gz llama-cuda-linux-x64.tar.gz.sha256 \
+            --clobber --repo "$GITHUB_REPOSITORY"

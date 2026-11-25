@@ -9,9 +9,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 )
+
+// Client is what Stream sends with. A reply streams for as long as the
+// model writes, so there is no limit on the whole request, but connecting
+// and the answer's headers have one each: a server that doesn't answer
+// fails instead of hanging. Cancel Stream's context to stop.
+var Client = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   4,
+	},
+}
+
+// IdleTimeout ends a reply that sends nothing for this long.
+var IdleTimeout = 5 * time.Minute
 
 // Message is a message of a conversation.
 type Message struct {
@@ -47,11 +68,19 @@ func Stream(ctx context.Context, base, key, model string, msgs []Message, temper
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req = req.WithContext(ctx)
+	resp, err := Client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// Silence for IdleTimeout ends the reply: the timer is pushed back
+	// with each line.
+	var silent atomic.Bool
+	idle := time.AfterFunc(IdleTimeout, func() { silent.Store(true); cancel() })
+	defer idle.Stop()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))
@@ -60,6 +89,7 @@ func Stream(ctx context.Context, base, key, model string, msgs []Message, temper
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	for sc.Scan() {
+		idle.Reset(IdleTimeout)
 		line := sc.Text()
 		data, ok := strings.CutPrefix(line, "data:")
 		if !ok {
@@ -105,5 +135,11 @@ func Stream(ctx context.Context, base, key, model string, msgs []Message, temper
 			stats.TokensPerSecond = ev.Timings.PredictedPerSecond
 		}
 	}
-	return stats, sc.Err()
+	if err := sc.Err(); err != nil {
+		if silent.Load() {
+			return stats, fmt.Errorf("chat: nothing came for %s", IdleTimeout)
+		}
+		return stats, err
+	}
+	return stats, nil
 }

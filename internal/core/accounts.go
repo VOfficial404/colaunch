@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"colaunch/internal/colab"
@@ -23,6 +24,10 @@ type Account struct {
 	// SignedOut is true once Google no longer takes its sign-in.
 	SignedOut  bool
 	Refreshing bool
+
+	// asking is true while a refresh asks Colab, so that refreshes don't
+	// pile up.
+	asking atomic.Bool
 }
 
 func (m *Manager) newAccount(r accountRecord, tok *google.Token) *Account {
@@ -115,8 +120,11 @@ func (m *Manager) RemoveAccount(a *Account) {
 	go func() {
 		if tok != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			google.Revoke(ctx, tok)
+			err := google.Revoke(ctx, tok)
 			cancel()
+			if err != nil {
+				m.Post(func() { m.Notify("error", "revoke_failed", errText(err)) })
+			}
 		}
 	}()
 	m.Secrets.Delete("account/" + a.Email)
@@ -136,14 +144,23 @@ func (m *Manager) RemoveAccount(a *Account) {
 	m.saveState()
 }
 
-// Refresh asks Colab for an account's balance and runtimes again.
-func (m *Manager) Refresh(a *Account) { go m.refreshAccount(a) }
-
-func (m *Manager) refreshAccount(a *Account) {
+// Refresh asks Colab for an account's balance and runtimes again. Call it
+// from the main thread: the account shows it's refreshing.
+func (m *Manager) Refresh(a *Account) {
 	if a.Client == nil {
 		return
 	}
-	m.Post(func() { a.Refreshing = true })
+	a.Refreshing = true
+	go m.refreshAccount(a)
+}
+
+// refreshAccount asks Colab for an account's balance and runtimes, and
+// shows them with a single Post. One already asking does for both.
+func (m *Manager) refreshAccount(a *Account) {
+	if a.Client == nil || !a.asking.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.asking.Store(false)
 	ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer cancel()
 	q, qerr := a.Client.Quota(ctx)

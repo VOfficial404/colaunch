@@ -130,7 +130,10 @@ jobs:
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          [ -n "$ANDROID_KEYSTORE" ] || { echo "No upload key: the APK is signed with the debug key."; exit 0; }
+          if [ -z "$ANDROID_KEYSTORE" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "::warning::No ANDROID_KEYSTORE or ANDROID_KEYSTORE_PASSWORD secret: the APK is signed with the debug key, which anyone can sign updates with. Set both to sign it with the upload key."
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/keys"
           echo "$ANDROID_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/keys/upload.p12"
           alias="$(keytool -list -v -storetype PKCS12 -keystore "$RUNNER_TEMP/keys/upload.p12" -storepass "$ANDROID_KEYSTORE_PASSWORD" | sed -n 's/^Alias name: //p' | head -1)"

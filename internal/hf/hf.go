@@ -15,8 +15,49 @@ import (
 	"time"
 )
 
-// Endpoint is Hugging Face's address; mirrors such as hf-mirror.com work.
-var Endpoint = "https://huggingface.co"
+// Official is Hugging Face's own address, the only one tokens go to.
+const Official = "https://huggingface.co"
+
+// Endpoint is Hugging Face's address; mirrors such as hf-mirror.com work,
+// over https, and get no token.
+var Endpoint = Official
+
+// CheckEndpoint returns the endpoint as requests use it, without a slash
+// at the end, or an error for one that isn't an https address.
+func CheckEndpoint(endpoint string) (string, error) {
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.Opaque != "" {
+		return "", fmt.Errorf("hf: %q isn't an address", endpoint)
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("hf: the endpoint %q should be an https address", endpoint)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("hf: the endpoint %q should be a plain address", endpoint)
+	}
+	return endpoint, nil
+}
+
+// IsOfficial reports whether endpoint is Hugging Face's own, to which the
+// token may go.
+func IsOfficial(endpoint string) bool {
+	e, err := CheckEndpoint(endpoint)
+	if err != nil {
+		return false
+	}
+	u, _ := url.Parse(e)
+	return strings.EqualFold(u.Hostname(), "huggingface.co") && (u.Port() == "" || u.Port() == "443") && u.Path == ""
+}
+
+// TokenFor is the token to send to endpoint: none to mirrors, which could
+// keep it.
+func TokenFor(endpoint, token string) string {
+	if !IsOfficial(endpoint) {
+		return ""
+	}
+	return token
+}
 
 // HTTP is the client requests go through.
 var HTTP = &http.Client{Timeout: 30 * time.Second}
@@ -61,9 +102,15 @@ func ParseRef(s string) (Ref, error) {
 // needs a token to see.
 var ErrNotFound = errors.New("hf: no such repository, or it needs an access token")
 
-// ListFiles returns the files of a repository's main branch.
+// ListFiles returns the files of a repository's main branch. The token
+// goes only to Hugging Face itself, not to a mirror.
 func ListFiles(ctx context.Context, repo, token string) ([]File, error) {
-	u := fmt.Sprintf("%s/api/models/%s/tree/main?recursive=true", strings.TrimSuffix(Endpoint, "/"), repo)
+	endpoint, err := CheckEndpoint(Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	token = TokenFor(endpoint, token)
+	u := fmt.Sprintf("%s/api/models/%s/tree/main?recursive=true", endpoint, repo)
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err

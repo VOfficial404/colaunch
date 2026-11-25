@@ -5,7 +5,9 @@
 package plugins
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -145,11 +147,16 @@ var (
 	registry = map[string]Plugin{}
 )
 
-// Register adds a plugin, replacing one with its ID.
-func Register(p Plugin) {
+// Register adds a plugin. A plugin with the same ID, built in or loaded
+// before, stays, and the new one is refused.
+func Register(p Plugin) error {
 	mu.Lock()
+	defer mu.Unlock()
+	if _, ok := registry[p.ID()]; ok {
+		return fmt.Errorf("plugins: a plugin with the id %q is already registered", p.ID())
+	}
 	registry[p.ID()] = p
-	mu.Unlock()
+	return nil
 }
 
 // Unregister removes a plugin.
@@ -210,30 +217,55 @@ func checkRequired(p Plugin, values map[string]string, lang string) error {
 
 // waitReady polls check every few seconds until it's true, the plugin's
 // process ends, or ctx is done. Each poll shows the log's new lines.
+//
+// A poll is one command on the runtime: the check, and when it fails, the
+// bytes the log grew by since the last poll (at most 256 KiB, in base64 so
+// that the terminal keeps the progress bars' carriage returns) and whether
+// the plugin's process is alive.
 func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check string) error {
 	deadline := time.Now().Add(timeout)
-	seen := ""
+	dir := agent.Home + "/plugins/" + id
+	var off int64
+	var carry []byte
+	var recent []string
 	for {
-		out, code, err := env.Shell.Run(ctx, check)
+		cmd := fmt.Sprintf(`if (%s) >/dev/null 2>&1 </dev/null; then echo @@WAIT-READY@@; exit 0; fi
+f=%s; sz=$(stat -c %%s "$f" 2>/dev/null || echo 0); off=%d
+[ "$sz" -lt "$off" ] && off=0; [ $((sz - off)) -gt 262144 ] && off=$((sz - 262144))
+run=unknown; pid=$(cat %s 2>/dev/null) && [ -n "$pid" ] && { kill -0 "$pid" 2>/dev/null && run=yes || run=no; }
+echo "@@WAIT $sz $off $run@@"; tail -c +$((off + 1)) "$f" 2>/dev/null | head -c $((sz - off)) | base64 -w0; echo`,
+			check, ShellQuote(dir+"/log.txt"), off, ShellQuote(dir+"/pid"))
+		out, _, err := env.Shell.Run(ctx, cmd)
 		if err != nil {
 			return err
 		}
-		if code == 0 {
+		if strings.Contains(out, "@@WAIT-READY@@") {
 			return nil
 		}
-		logs, _ := agent.Logs(ctx, env.Shell, id, 400)
-		seen = showNew(env, seen, logs)
-		// The plugin's script prints its phases.
-		if p := lastPhase(logs); p != "" {
-			env.Phase(p)
-		}
-		st, _ := agent.GetStatus(ctx, env.Shell)
-		if st != nil {
-			if pl, ok := st.Plugins[id]; ok && !pl.Running {
-				return fmt.Errorf("the plugin stopped: %s", lastLines(logs, 12))
+		running := true
+		if i := strings.Index(out, "@@WAIT "); i >= 0 {
+			head, data, _ := strings.Cut(out[i+len("@@WAIT "):], "\n")
+			var size, from int64
+			var run string
+			if _, err := fmt.Sscanf(strings.TrimSuffix(head, "@@"), "%d %d %s", &size, &from, &run); err == nil {
+				if from != off {
+					// The log was cut, or grew past what one poll takes.
+					carry = nil
+				}
+				if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data)); err == nil {
+					carry = showNew(env, carry, b, &recent)
+					off = size
+				}
+				running = run != "no"
 			}
 		}
-		_ = out
+		if !running {
+			tail := recent
+			if len(carry) > 0 {
+				tail = append(tail, string(carry))
+			}
+			return fmt.Errorf("the plugin stopped: %s", strings.Join(tail, "\n"))
+		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("the plugin didn't get ready in %s", timeout)
 		}
@@ -245,27 +277,42 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 	}
 }
 
-// showNew logs the lines of logs after those seen before.
-func showNew(env *Env, seen, logs string) string {
-	old := strings.Split(strings.TrimSpace(seen), "\n")
-	cur := strings.Split(strings.TrimSpace(logs), "\n")
-	// Find where the old tail ends in the new log.
-	start := 0
-	if len(old) > 0 && old[0] != "" {
-		last := old[len(old)-1]
-		for i := len(cur) - 1; i >= 0; i-- {
-			if cur[i] == last {
-				start = i + 1
-				break
-			}
-		}
+// showNew logs the whole lines of carry and chunk, the bytes the log
+// grew by after carry, the start of a line it had, and returns the start
+// of a line chunk ends with. A line redrawn with carriage returns, as a
+// progress bar, shows as it ended. The phase the lines print goes to
+// env.Phase, and the last 12 lines to recent. At most 400 lines show at
+// once, the last.
+func showNew(env *Env, carry, chunk []byte, recent *[]string) []byte {
+	data := append(carry, chunk...)
+	end := bytes.LastIndexByte(data, '\n')
+	if end < 0 {
+		return data
 	}
-	for _, l := range cur[start:] {
+	lines := strings.Split(string(data[:end]), "\n")
+	for i, l := range lines {
+		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
+			l = l[j+1:]
+		}
+		lines[i] = l
+	}
+	// The plugin's script prints its phases.
+	if p := lastPhase(strings.Join(lines, "\n")); p != "" {
+		env.Phase(p)
+	}
+	*recent = append(*recent, lines...)
+	if len(*recent) > 12 {
+		*recent = append([]string(nil), (*recent)[len(*recent)-12:]...)
+	}
+	if len(lines) > 400 {
+		lines = lines[len(lines)-400:]
+	}
+	for _, l := range lines {
 		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "@@PHASE") {
 			env.Log("%s", l)
 		}
 	}
-	return logs
+	return append([]byte(nil), data[end+1:]...)
 }
 
 func lastPhase(logs string) string {

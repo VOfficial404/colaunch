@@ -94,38 +94,36 @@ func (m mapSecrets) Set(k string, v []byte) error { m[k] = v; return nil }
 func (m mapSecrets) Delete(k string) error        { delete(m, k); return nil }
 
 type call struct {
-	email, acc string
+	acc string
 }
 
 // grabWith runs grab with try's answers, counting the rounds it waits.
-func grabWith(t *testing.T, accounts []*Account, machine Machine, try func(call, int) error) (grabbed, []call, int, error) {
+func grabWith(t *testing.T, machine Machine, try func(call, int) error) (grabbed, []call, int, error) {
 	m := New(t.TempDir(), mapSecrets{})
 	waits := 0
 	old := grabSleep
 	grabSleep = func(context.Context, time.Duration) error { waits++; return nil }
 	t.Cleanup(func() { grabSleep = old })
 	var calls []call
-	got, err := m.grab(context.Background(), &Session{}, accounts, machine, 3, func(a *Account, spec colab.Spec) error {
-		c := call{a.Email, spec.Accelerator}
+	s := &Session{sessionRecord: sessionRecord{Account: "a1"}}
+	got, err := m.grab(context.Background(), s, machine, 3, func(spec colab.Spec) error {
+		c := call{spec.Accelerator}
 		calls = append(calls, c)
 		return try(c, len(calls))
 	})
+	if s.Account != "a1" {
+		t.Errorf("the session moved to %q", s.Account)
+	}
 	return got, calls, waits, err
 }
 
-func acct(email string) *Account {
-	a := &Account{}
-	a.Email = email
-	return a
-}
-
-// Grabbing asks for each accelerator on each account, round after round,
-// skipping an account out of quota, until one is assigned.
+// Grabbing asks for each accelerator, round after round, waiting a round
+// when the account is out of quota, until one is assigned; it asks the
+// session's account alone.
 func TestGrabRotates(t *testing.T) {
-	a1, a2 := acct("a1"), acct("a2")
 	machine := Machine{Variant: "gpu", Accelerator: "A100", Fallbacks: []string{"L4", "A100"}, Grab: true}
-	got, calls, waits, err := grabWith(t, []*Account{a1, a2}, machine, func(c call, n int) error {
-		if c.email == "a1" {
+	got, calls, waits, err := grabWith(t, machine, func(c call, n int) error {
+		if n == 1 {
 			return colab.ErrQuota
 		}
 		if n < 5 {
@@ -133,11 +131,11 @@ func TestGrabRotates(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil || got.account != a2 || got.spec.Accelerator != "A100" || got.tries != 5 {
+	if err != nil || got.spec.Accelerator != "L4" || got.tries != 5 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
-	want := []call{{"a1", "A100"}, {"a2", "A100"}, {"a2", "L4"}, {"a1", "A100"}, {"a2", "A100"}}
-	if fmt.Sprint(calls) != fmt.Sprint(want) || waits != 1 {
+	want := []call{{"A100"}, {"A100"}, {"L4"}, {"A100"}, {"L4"}}
+	if fmt.Sprint(calls) != fmt.Sprint(want) || waits != 2 {
 		t.Errorf("calls %v, %d waits", calls, waits)
 	}
 }
@@ -145,18 +143,18 @@ func TestGrabRotates(t *testing.T) {
 // Without grabbing, one round of no accelerators fails at once, and an
 // error that waiting won't fix fails even while grabbing.
 func TestGrabGivesUp(t *testing.T) {
-	_, calls, waits, err := grabWith(t, []*Account{acct("a")}, Machine{Variant: "gpu", Accelerator: "T4", Fallbacks: []string{"L4"}},
+	_, calls, waits, err := grabWith(t, Machine{Variant: "gpu", Accelerator: "T4", Fallbacks: []string{"L4"}},
 		func(call, int) error { return colab.ErrUnavailable })
 	if !errors.Is(err, colab.ErrUnavailable) || len(calls) != 2 || waits != 0 {
 		t.Errorf("no grab: %v, %d calls, %d waits", err, len(calls), waits)
 	}
-	_, calls, _, err = grabWith(t, []*Account{acct("a")}, Machine{Variant: "gpu", Accelerator: "T4", Grab: true},
+	_, calls, _, err = grabWith(t, Machine{Variant: "gpu", Accelerator: "T4", Grab: true},
 		func(call, int) error { return colab.ErrDenylisted })
 	if !errors.Is(err, colab.ErrDenylisted) || len(calls) != 1 {
 		t.Errorf("denylisted: %v, %d calls", err, len(calls))
 	}
 	// Too little GPU memory is tried again, as many times as the settings say.
-	_, calls, _, err = grabWith(t, []*Account{acct("a")}, Machine{Variant: "gpu", Accelerator: "A100", MinVRAM: 80},
+	_, calls, _, err = grabWith(t, Machine{Variant: "gpu", Accelerator: "A100", MinVRAM: 80},
 		func(call, int) error { return errTooLittleVRAM })
 	if !errors.Is(err, errTooLittleVRAM) || len(calls) != 3 {
 		t.Errorf("vram: %v, %d calls", err, len(calls))

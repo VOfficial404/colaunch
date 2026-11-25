@@ -18,6 +18,8 @@ type accountsState struct {
 	err      string
 	confirm  bool
 	toRemove *core.Account
+	// importFailed is set when no editor had the Colab extension's client.
+	importFailed bool
 }
 
 func (a *App) startLogin() {
@@ -46,25 +48,29 @@ func (a *App) startLogin() {
 func (a *App) accountsPage(c *ui.Context) {
 	s := &a.accounts
 	t := c.Theme()
+	hasClient := a.m.Client().Valid()
 	pageScroll(c, i18n.T("nav.accounts"), func() {
-		if labeledButton(c, iconPlus, i18n.T("account.add"), true).Clicked() {
+		// Signing in needs a client: until there is one, the guide below
+		// says what to do first.
+		b := labeledButton(c, iconPlus, i18n.T("account.add"), hasClient && len(a.m.Accounts) > 0).Disabled(!hasClient)
+		if !hasClient {
+			b.Tooltip(i18n.T("client.needed"))
+		}
+		if b.Clicked() {
 			a.startLogin()
 		}
 	}, func() {
-		if !a.m.Client().Valid() {
-			a.clientCard(c)
+		if !hasClient && len(a.m.Accounts) > 0 {
+			ui.Text(c, i18n.T("client.needed")).FontSize(13).TextColor(t.Warning)
 		}
 		if s.login != nil {
 			a.loginCard(c)
 		}
-		if s.err != "" {
-			ui.Text(c, s.err).TextColor(t.Danger).Selectable()
+		a.errorNotice(c, "login", s.err)
+		if s.login == nil && (len(a.m.Accounts) == 0 || !hasClient) {
+			a.onboarding(c)
 		}
-		if len(a.m.Accounts) == 0 && s.login == nil {
-			card(c, func() {
-				ui.Text(c, i18n.T("account.welcome")).FontSize(17).Bold()
-				ui.Text(c, i18n.T("account.welcome_text")).TextColor(t.TextMuted)
-			})
+		if len(a.m.Accounts) == 0 {
 			return
 		}
 		// Every account's balance at a glance.
@@ -79,7 +85,7 @@ func (a *App) accountsPage(c *ui.Context) {
 			card(c, func() {
 				ui.Row(c).Gap(12).Wrap().Children(func() {
 					stat(c, fmt.Sprintf("%.2f", total), i18n.T("account.total"))
-					stat(c, fmt.Sprintf("%.2f/h", rate), i18n.T("cost.rate"))
+					stat(c, fmt.Sprintf("%.2f", rate), i18n.T("cost.rate"))
 					stat(c, fmt.Sprint(len(a.m.Accounts)), i18n.T("nav.accounts"))
 				})
 			})
@@ -90,7 +96,7 @@ func (a *App) accountsPage(c *ui.Context) {
 		}
 	})
 	if s.confirm && s.toRemove != nil {
-		switch ui.AlertDialog(c, &s.confirm, i18n.T("account.remove_title"), i18n.F("account.remove_text", s.toRemove.Email), i18n.T("cancel"), i18n.T("remove")) {
+		switch dangerConfirm(c, &s.confirm, i18n.T("account.remove_title"), i18n.F("account.remove_text", s.toRemove.Email), i18n.T("cancel"), i18n.T("remove")) {
 		case 1:
 			a.m.RemoveAccount(s.toRemove)
 			s.toRemove = nil
@@ -110,10 +116,13 @@ func (a *App) loginCard(c *ui.Context) {
 		})
 		ui.Text(c, i18n.T("login.paste_help")).FontSize(12).TextColor(t.TextMuted)
 		ui.Row(c).Gap(8).Children(func() {
-			in := ui.TextInput(c, &s.paste).Placeholder("http://127.0.0.1:…/?state=…&code=…").Grow(1).Autocorrect(false).Capitalize(ui.CapitalizeNone)
+			in := ui.TextInput(c, &s.paste).Placeholder(i18n.F("form.example", "http://127.0.0.1:…/?state=…&code=…")).Grow(1).Autocorrect(false).Capitalize(ui.CapitalizeNone)
 			if ui.Button(c, i18n.T("login.submit")).Clicked() || in.Submitted() {
 				if err := s.login.Paste(s.paste); err != nil {
-					s.err = err.Error()
+					s.err = i18n.T("login.paste_invalid")
+				} else {
+					// The address holds the code: don't keep it around.
+					s.paste = ""
 				}
 			}
 		})
@@ -132,33 +141,17 @@ func (a *App) loginCard(c *ui.Context) {
 	})
 }
 
-// clientCard says that no OAuth client is set, and how to set one.
-func (a *App) clientCard(c *ui.Context) {
-	t := c.Theme()
-	section(c, i18n.T("client.title"), func() {
-		ui.Text(c, i18n.T("client.text")).TextColor(t.TextMuted).FontSize(13)
-		ui.Row(c).Gap(8).Wrap().Children(func() {
-			if isDesktop() {
-				if labeledButton(c, iconRefresh, i18n.T("client.import"), true).Clicked() {
-					a.importClient()
-				}
-			}
-			if ui.Button(c, i18n.T("nav.settings")).Clicked() {
-				a.page = pageSettings
-			}
-			if ui.Button(c, i18n.T("client.docs")).Clicked() {
-				openURL("https://github.com/VOfficial404/colaunch/blob/main/docs/oauth.md")
-			}
-		})
-	})
-}
-
 func (a *App) importClient() {
 	cl, dir, err := google.FindEditorClient()
 	if err != nil {
-		a.toasts = append(a.toasts, ui.Toast{Title: i18n.T("client.not_found"), Type: "error"})
+		a.accounts.importFailed = true
+		a.toasts = append(a.toasts, ui.Toast{
+			Title: i18n.T("client.not_found"), Description: i18n.T("client.not_found_text"), Type: "error",
+			Action: i18n.T("client.manual"), OnAction: func() { a.page = pageSettings },
+		})
 		return
 	}
+	a.accounts.importFailed = false
 	a.m.Settings.OAuth = cl
 	a.m.SaveSettings()
 	a.settings.loaded = false
@@ -186,7 +179,7 @@ func (a *App) accountCard(c *ui.Context, acct *core.Account, active bool) {
 						ui.Badge(c, tierName(acct.Quota.Tier))
 					}
 					if active {
-						ui.Text(c, i18n.T("account.active")).FontSize(12).TextColor(accent).Bold()
+						ui.Text(c, i18n.T("account.active")).FontSize(12).TextColor(t.Accent).Bold()
 					}
 				})
 				ui.Text(c, acct.Email).FontSize(12).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
@@ -198,12 +191,15 @@ func (a *App) accountCard(c *ui.Context, acct *core.Account, active bool) {
 		if acct.SignedOut {
 			ui.Text(c, i18n.T("account.signed_out")).TextColor(t.Warning).FontSize(13)
 		} else if acct.QuotaErr != "" {
-			ui.Text(c, acct.QuotaErr).TextColor(t.Danger).FontSize(13).Selectable()
+			a.errorNotice(c, "quota-"+acct.Email, acct.QuotaErr)
+		}
+		if isFreeTier(acct) {
+			freeTierNotice(c)
 		}
 		if q := acct.Quota; q != nil {
 			ui.Row(c).Gap(12).Wrap().Children(func() {
 				stat(c, fmt.Sprintf("%.2f", q.Balance), i18n.T("cost.balance"))
-				stat(c, fmt.Sprintf("%.2f/h", q.RateHourly), i18n.T("cost.rate"))
+				stat(c, fmt.Sprintf("%.2f", q.RateHourly), i18n.T("cost.rate"))
 				left := "—"
 				if h := q.HoursLeft(); h >= 0 {
 					left = duration(time.Duration(h * float64(time.Hour)))
@@ -227,7 +223,7 @@ func (a *App) accountCard(c *ui.Context, acct *core.Account, active bool) {
 				}
 			}
 			if acct.SignedOut {
-				if ui.Button(c, i18n.T("account.sign_in_again")).Clicked() {
+				if ui.PrimaryButton(c, i18n.T("account.sign_in_again")).Disabled(!a.m.Client().Valid()).Clicked() {
 					a.startLogin()
 				}
 			}
@@ -241,7 +237,7 @@ func (a *App) accountCard(c *ui.Context, acct *core.Account, active bool) {
 		})
 	})
 	if active {
-		el.Border(2, accent)
+		el.Border(2, t.Accent)
 	}
 }
 
@@ -262,7 +258,7 @@ func balanceLine(acct *core.Account) string {
 	q := acct.Quota
 	if q == nil {
 		if acct.QuotaErr != "" {
-			return acct.QuotaErr
+			return shortError(acct.QuotaErr)
 		}
 		return i18n.T("loading")
 	}

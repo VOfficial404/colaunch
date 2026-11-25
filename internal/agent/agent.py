@@ -9,17 +9,25 @@
 #   agent.py stop ID           stop a plugin
 #   agent.py logs ID [LINES]   print the end of a plugin's log
 #   agent.py unassign REASON   give the runtime back to Colab now
+#   agent.py prepare ID        make a plugin's folder
+#   agent.py private ID        make a new private folder for a plugin's secrets
+#   agent.py seal PATH         make a file there readable by its owner alone
 #
 # The watchdog runs on the runtime, so the limits hold with the app closed.
+# Its files are in folders only their owner can open, and the files it
+# writes are made anew, exclusively, then renamed into place.
 
 import base64
 import json
 import os
+import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -56,11 +64,38 @@ def read_json(path, default=None):
         return default
 
 
+def private_dir(path):
+    """Makes path a folder only its owner can open, refusing a link or
+    someone else's folder in its place."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        sys.exit("%s isn't a folder" % path)
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        sys.exit("%s isn't ours" % path)
+    if stat.S_IMODE(st.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+    return path
+
+
+def write_file(path, data):
+    """Writes path anew: a file of its own, made exclusively beside it and
+    readable by its owner alone, renamed into place."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_json(path, value):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(value, f)
-    os.replace(tmp, path)
+    write_file(path, json.dumps(value))
 
 
 # ---------------------------------------------------------------- mux
@@ -121,7 +156,7 @@ class Mux:
         threading.Thread(target=self.pump, args=(cid, s), daemon=True).start()
 
     def run(self):
-        os.makedirs(HOME, exist_ok=True)
+        private_dir(HOME)
         stdin = os.fdopen(0, "rb", buffering=0)
         buf = b""
         self.send("@@COLAUNCH-MUX-READY@@")
@@ -222,25 +257,110 @@ def alive(pid):
         return False
 
 
-def plugin_state(pid_file):
+def proc_start(pid):
+    """The time a process started, in clock ticks since boot, None when
+    /proc doesn't say."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            data = f.read()
+        return int(data[data.rindex(")") + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def proc_has(pid, name, item):
+    """Whether /proc/PID/NAME, environ or cmdline, has item among its
+    NUL-separated entries; None when it can't be read."""
+    try:
+        with open("/proc/%d/%s" % (pid, name), "rb") as f:
+            return item.encode() in f.read().split(b"\0")
+    except OSError:
+        return None
+
+
+def read_pid(pid_file):
+    """The process a pid file names: {"pid", "start"}, or an older file's
+    bare number."""
     try:
         with open(pid_file) as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
+            text = f.read().strip()
+    except OSError:
         return None
-    return {"pid": pid, "running": alive(pid)}
+    try:
+        rec = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(rec, int):
+        rec = {"pid": rec}
+    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int) or rec["pid"] <= 0:
+        return None
+    return rec
+
+
+def write_pid(pid_file, pid):
+    write_json(pid_file, {"pid": pid, "start": proc_start(pid)})
+
+
+def owns(rec, proc_file, item):
+    """Whether the process rec names is still the one started, not another
+    that got its number since: it started when it did, and its proc_file
+    (environ or cmdline) has item. True, False, or None where there's no
+    /proc to tell."""
+    pid = rec["pid"]
+    if not alive(pid):
+        return False
+    if not os.path.isdir("/proc/self"):
+        return None
+    start = proc_start(pid)
+    if start is None:
+        return False
+    if rec.get("start") is not None and start != rec["start"]:
+        return False
+    has = proc_has(pid, proc_file, item)
+    if has is False:
+        return False
+    if has is None and rec.get("start") is None:
+        return False
+    return True
+
+
+ID = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,40}$")
+
+
+def plugin_dir(name):
+    if not ID.match(name):
+        sys.exit("bad plugin id %r" % name)
+    return os.path.join(PLUGINS, name)
+
+
+def plugin_owns(name, rec):
+    return owns(rec, "environ", "COLAUNCH_PLUGIN_DIR=" + plugin_dir(name))
+
+
+def watchdog_owns(rec):
+    return owns(rec, "cmdline", "watchdog")
+
+
+def plugin_state(pid_file, check):
+    rec = read_pid(pid_file)
+    if rec is None:
+        return None
+    o = check(rec)
+    return {"pid": rec["pid"], "running": alive(rec["pid"]) if o is None else o}
 
 
 def status():
     plugins = {}
     if os.path.isdir(PLUGINS):
         for name in sorted(os.listdir(PLUGINS)):
-            st = plugin_state(os.path.join(PLUGINS, name, "pid"))
+            if not ID.match(name):
+                continue
+            st = plugin_state(os.path.join(PLUGINS, name, "pid"), lambda rec: plugin_owns(name, rec))
             if st is not None:
                 st["state"] = read_json(os.path.join(PLUGINS, name, "state.json"), {})
                 plugins[name] = st
     cfg = read_json(CONFIG, {})
-    wd = plugin_state(os.path.join(HOME, "watchdog.pid"))
+    wd = plugin_state(os.path.join(HOME, "watchdog.pid"), watchdog_owns)
     try:
         load = os.getloadavg()[0]
     except OSError:
@@ -263,39 +383,69 @@ def status():
 
 # ---------------------------------------------------------------- plugins
 
+def prepare(pid_name):
+    private_dir(HOME)
+    private_dir(PLUGINS)
+    return private_dir(plugin_dir(pid_name))
+
+
+def private(pid_name):
+    """Prints a new folder, only the owner's, for the secrets of a plugin's
+    run."""
+    d = private_dir(os.path.join(prepare(pid_name), "private"))
+    print(tempfile.mkdtemp(dir=d))
+
+
+def seal(path):
+    """Makes a file put in a plugin's folder readable by its owner alone."""
+    base = os.path.realpath(PLUGINS) + os.sep
+    st = os.lstat(path)
+    if not os.path.realpath(path).startswith(base) or not stat.S_ISREG(st.st_mode):
+        sys.exit("%s isn't a plugin's file" % path)
+    os.chmod(path, 0o600)
+    print("sealed")
+
+
 def run(pid_name, script):
-    d = os.path.join(PLUGINS, pid_name)
-    os.makedirs(d, exist_ok=True)
+    d = prepare(pid_name)
     stop(pid_name, quiet=True)
-    log = open(os.path.join(d, "log.txt"), "ab", buffering=0)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    log = os.fdopen(os.open(os.path.join(d, "log.txt"), flags, 0o600), "ab", buffering=0)
     env = dict(os.environ, COLAUNCH_HOME=HOME, COLAUNCH_PLUGIN_DIR=d,
                COLAUNCH_BUSY=BUSY, COLAUNCH_ACTIVITY=ACTIVITY)
     p = subprocess.Popen(["bash", script], cwd=d, stdout=log, stderr=log,
                          stdin=subprocess.DEVNULL, env=env, start_new_session=True)
-    with open(os.path.join(d, "pid"), "w") as f:
-        f.write(str(p.pid))
+    write_pid(os.path.join(d, "pid"), p.pid)
     print(p.pid)
 
 
-def stop(pid_name, quiet=False):
-    st = plugin_state(os.path.join(PLUGINS, pid_name, "pid"))
-    if st and st["running"]:
+def stop(pid_name, quiet=False, forget=False):
+    """Stops a plugin's processes, once sure its pid is still the plugin's.
+    forget also removes what's left of its secrets."""
+    d = plugin_dir(pid_name)
+    rec = read_pid(os.path.join(d, "pid"))
+    o = plugin_owns(pid_name, rec) if rec else False
+    if o is None:
+        print("can't tell whether process %d is still the plugin's: left running" % rec["pid"])
+    elif o:
         try:
-            os.killpg(st["pid"], signal.SIGTERM)
+            os.killpg(rec["pid"], signal.SIGTERM)
             for _ in range(50):
-                if not alive(st["pid"]):
+                if not plugin_owns(pid_name, rec):
                     break
                 time.sleep(0.1)
-            if alive(st["pid"]):
-                os.killpg(st["pid"], signal.SIGKILL)
+            if plugin_owns(pid_name, rec):
+                os.killpg(rec["pid"], signal.SIGKILL)
         except OSError:
             pass
+    if forget:
+        shutil.rmtree(os.path.join(d, "private"), ignore_errors=True)
     if not quiet:
         print("stopped")
 
 
 def logs(pid_name, lines=200):
-    path = os.path.join(PLUGINS, pid_name, "log.txt")
+    path = os.path.join(plugin_dir(pid_name), "log.txt")
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -331,6 +481,7 @@ def runtime_addr():
 def unassign(reason):
     """Asks Colab to take the runtime back, as google.colab.runtime.unassign
     does."""
+    private_dir(HOME)
     write_json(STOPPED, {"reason": reason, "time": time.time()})
     addr = runtime_addr()
     if not addr:
@@ -355,9 +506,9 @@ def busy_now():
 
 
 def watchdog():
-    os.makedirs(HOME, exist_ok=True)
+    private_dir(HOME)
     pid_file = os.path.join(HOME, "watchdog.pid")
-    st = plugin_state(pid_file)
+    st = plugin_state(pid_file, watchdog_owns)
     if st and st["running"] and st["pid"] != os.getpid():
         print("already running")
         return
@@ -367,8 +518,7 @@ def watchdog():
     os.setsid()
     if os.fork() > 0:
         os._exit(0)
-    with open(pid_file, "w") as f:
-        f.write(str(os.getpid()))
+    write_pid(pid_file, os.getpid())
     devnull = os.open(os.devnull, os.O_RDWR)
     for fd in (0, 1, 2):
         os.dup2(devnull, fd)
@@ -410,7 +560,13 @@ def main():
     elif cmd == "run":
         run(sys.argv[2], sys.argv[3])
     elif cmd == "stop":
-        stop(sys.argv[2])
+        stop(sys.argv[2], forget=True)
+    elif cmd == "prepare":
+        print(prepare(sys.argv[2]))
+    elif cmd == "private":
+        private(sys.argv[2])
+    elif cmd == "seal":
+        seal(sys.argv[2])
     elif cmd == "logs":
         logs(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 200)
     elif cmd == "unassign":

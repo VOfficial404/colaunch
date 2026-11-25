@@ -33,9 +33,13 @@ func (a *App) initMobileBackground() {
 	}
 	a.mobile.ready = true
 	a.mobile.foreground = true
-	mygo.Power.OnSuspend(func() { a.mobile.foreground = false })
+	mygo.Power.OnSuspend(func() {
+		a.mobile.foreground = false
+		a.setCoreBackground(true)
+	})
 	mygo.Power.OnResume(func() {
 		a.mobile.foreground = true
+		a.setCoreBackground(false)
 		// Android can stop the service while the app is in the background.
 		// Retry once the user has brought the app to the foreground again.
 		a.mobile.resumed = true
@@ -44,6 +48,10 @@ func (a *App) initMobileBackground() {
 	})
 	a.syncMobileBackground()
 }
+
+// setCoreBackground tells the manager whether the app is in the
+// background, for it to do less there.
+func (a *App) setCoreBackground(on bool) { a.m.SetBackground(on) }
 
 func (a *App) mobileBackgroundRequest() backgroundRequest {
 	if a.m.Settings.BackgroundEnabled() {

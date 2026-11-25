@@ -26,8 +26,12 @@ import (
 // Version is the app's version, set at build time.
 var Version = "dev"
 
-// accent is Colab's orange.
-var accent = ui.Hex("#e8710a")
+// accent is Colab's orange, for icons and large areas. Text and primary
+// buttons in the light theme take accentDeep, which reads on white.
+var (
+	accent     = ui.Hex("#e8710a")
+	accentDeep = ui.Hex("#b45309")
+)
 
 const (
 	pageDeploy   = "deploy"
@@ -52,6 +56,8 @@ type App struct {
 	ports    portsState
 	accounts accountsState
 	settings settingsState
+	// details are the errors whose details are open, by notice.
+	details map[string]bool
 
 	desktop          desktopBackground
 	mobile           mobileBackground
@@ -105,6 +111,9 @@ func Run() error {
 				}
 			})
 		}
+		// Snapshots for the manager's own bookkeeping: on the main thread,
+		// without redrawing the window.
+		m.Peek = func(fn func()) { mygo.RunOnMain(fn) }
 		m.Notify = a.notify
 		a.initDesktopBackground()
 		a.initMobileBackground()
@@ -124,12 +133,18 @@ func (a *App) notify(kind, title, text string) {
 	if kind == "info" && title != "" && text == "" {
 		text = i18n.T("stopped")
 	}
+	// The manager names some of its messages by key.
+	if key := "accounts." + title; i18n.Has(key) {
+		title, text = i18n.T(key), ""
+	}
+	important := kind != "success"
 	if kind == "grabbed" {
-		kind, text = "success", i18n.F("grab.got", text)
-		// Grabbing can take hours: say so outside the window too.
-		if a.win != nil && !a.win.IsFocused() && mygo.NotificationsSupported() {
-			mygo.NewNotification(mygo.NotificationOptions{Title: title, Body: text}).Show()
-		}
+		kind, text, important = "success", i18n.F("grab.got", text), true
+	}
+	// Grabbing can take hours and a runtime can be reclaimed while the app is
+	// in the background: say so outside the window too.
+	if important && a.win != nil && !a.win.IsFocused() && mygo.NotificationsSupported() {
+		mygo.NewNotification(mygo.NotificationOptions{Title: title, Body: text}).Show()
 	}
 	a.toasts = append(a.toasts, ui.Toast{Title: title, Description: text, Type: kind})
 }
@@ -183,7 +198,11 @@ func (a *App) theme(c *ui.Context) {
 	default:
 		t = c.Theme()
 	}
-	th := *t.WithAccent(accent)
+	brand := accent
+	if !t.Dark {
+		brand = accentDeep
+	}
+	th := *t.WithAccent(brand)
 	th.Radius = 8
 	c.SetTheme(&th)
 }
@@ -241,12 +260,19 @@ func (a *App) narrow(c *ui.Context) {
 				active := a.page == p || (p == pageSettings && (a.page == pagePorts || a.page == pagePlugins))
 				color := t.TextMuted
 				if active {
-					color = accent
+					color = t.Accent
 				}
-				col := ui.Column(c.Key(p)).Grow(1).AlignItems(ui.Center).Gap(2).PaddingY(4).Focusable().Role(ui.RoleTab).Label(i18n.T(it.key))
+				col := ui.Column(c.Key(p)).Grow(1).AlignItems(ui.Center).Gap(2).PaddingY(4).Focusable().Role(ui.RoleTab).Label(i18n.T(it.key)).AccessSelected(active)
 				col.Children(func() {
-					ui.Icon(c, it.icon).FontSize(20).TextColor(color)
-					ui.Text(c, i18n.T(it.key)).FontSize(11).TextColor(color).SingleLine()
+					pill := ui.Row(c).Padding(2, 14).Radius(999)
+					if active {
+						pill.Background(accent.Alpha(0.16))
+					}
+					pill.Children(func() { ui.Icon(c, it.icon).FontSize(20).TextColor(color) })
+					label := ui.Text(c, i18n.T(it.key)).FontSize(11).TextColor(color).SingleLine()
+					if active {
+						label.Bold()
+					}
 				})
 				if col.Clicked() {
 					a.page = p
@@ -290,13 +316,19 @@ func (a *App) accountFooter(c *ui.Context) {
 	t := c.Theme()
 	acct := a.m.Active()
 	box := ui.Column(c).Padding(12, 14).Gap(2).BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Focusable().Role(ui.RoleButton)
+	if acct == nil {
+		box.Label(i18n.T("account.none"))
+	} else {
+		box.Label(i18n.F("account.footer_label", acct.Email, balanceLine(acct)))
+	}
 	box.Children(func() {
+		ui.Text(c, i18n.T("account.current")).FontSize(11).Bold().TextColor(t.TextMuted)
 		if acct == nil {
 			ui.Text(c, i18n.T("account.none")).TextColor(t.TextMuted).FontSize(12)
 			return
 		}
 		ui.Text(c, acct.Email).FontSize(12).SingleLine().Ellipsis("…")
-		ui.Text(c, balanceLine(acct)).FontSize(12).TextColor(t.TextMuted).SingleLine()
+		ui.Text(c, balanceLine(acct)).FontSize(12).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
 	})
 	if box.Clicked() {
 		a.page = pageAccounts
@@ -305,12 +337,23 @@ func (a *App) accountFooter(c *ui.Context) {
 
 // pageScroll builds a page's frame: a title, and content that scrolls.
 func pageScroll(c *ui.Context, title string, actions func(), body func()) {
+	pageFrame(c, title, nil, actions, body, nil)
+}
+
+// pageFrame is pageScroll with, where they aren't nil, a button back to
+// Settings before the title, and a bar under the content that stays put
+// as it scrolls.
+func pageFrame(c *ui.Context, title string, back func(), actions func(), body func(), footer func()) {
 	t := c.Theme()
-	pad := float32(24)
-	if w, _ := c.Size(); w < 720 {
-		pad = 14
-	}
+	pad := pagePad(c)
 	ui.Column(c).Fill().Children(func() {
+		if back != nil {
+			ui.Row(c).Padding(10, pad, 0, pad).Children(func() {
+				if ui.Button(c, i18n.T("back.settings")).Label(i18n.T("back.settings_label")).Clicked() {
+					back()
+				}
+			})
+		}
 		ui.Row(c).Padding(16, pad, 8, pad).AlignItems(ui.Center).Gap(8).Children(func() {
 			ui.Text(c, title).FontSize(22).Bold().Grow(1)
 			if actions != nil {
@@ -320,8 +363,37 @@ func pageScroll(c *ui.Context, title string, actions func(), body func()) {
 		ui.Scroll(c).Grow(1).Children(func() {
 			ui.Column(c).Padding(8, pad, 32, pad).Gap(16).MaxWidth(980).FillWidth().Children(body)
 		})
+		if footer != nil {
+			ui.Column(c).Padding(10, pad).Gap(8).Background(t.Surface).BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Children(footer)
+		}
 	})
-	_ = t
+}
+
+func pagePad(c *ui.Context) float32 {
+	if isNarrow(c) {
+		return 14
+	}
+	return 24
+}
+
+// formCols is how many columns a form's fields take: one on phones.
+func formCols(c *ui.Context) int {
+	if w, _ := c.Size(); w < 480 {
+		return 1
+	}
+	return 2
+}
+
+// isNarrow reports whether the window is a phone's, without a sidebar.
+func isNarrow(c *ui.Context) bool {
+	w, _ := c.Size()
+	return w < 720
+}
+
+// isPhone reports whether the window is as narrow as a phone held upright.
+func isPhone(c *ui.Context) bool {
+	w, _ := c.Size()
+	return w < 480
 }
 
 // card is a box of related things.
@@ -380,6 +452,67 @@ func labeledButton(c *ui.Context, icon *ui.SVG, label string, primary bool) ui.E
 		ui.Text(c, label).SingleLine()
 	})
 	return b
+}
+
+// dangerConfirm is an alert whose last button, the one that does what
+// can't be undone, is in the theme's Danger color.
+func dangerConfirm(c *ui.Context, open *bool, title, text, cancel, confirm string) int {
+	t := *c.Theme()
+	black := ui.Hex("#000000")
+	t.Accent, t.AccentHover, t.AccentPressed = t.Danger, t.Danger.Mix(black, 0.12), t.Danger.Mix(black, 0.25)
+	t.AccentText = ui.Hex("#ffffff")
+	t.Focus = t.Danger.Alpha(0.55)
+	chosen := -1
+	ui.Themed(c, &t).Size(0, 0).Children(func() {
+		chosen = ui.AlertDialog(c, open, title, text, cancel, confirm)
+	})
+	return chosen
+}
+
+// undoable does what can be undone for a moment: hide hides it now, and
+// do does it once the toast closes, unless its Undo was clicked, which
+// runs restore.
+func (a *App) undoable(title string, hide, restore, do func()) {
+	hide()
+	undone := false
+	a.toasts = append(a.toasts, ui.Toast{
+		Title: title, Type: "info", Timeout: 6e9,
+		Action:   i18n.T("undo"),
+		OnAction: func() { undone = true; restore() },
+		OnClose: func() {
+			if !undone {
+				do()
+			}
+		},
+	})
+}
+
+// isFreeTier reports whether Colab gives the account only its free tier.
+func isFreeTier(acct *core.Account) bool {
+	if acct == nil || acct.Quota == nil {
+		return false
+	}
+	switch acct.Quota.Tier {
+	case "NONE", "FREE":
+		return true
+	}
+	return false
+}
+
+const colabFAQ = "https://research.google.com/colaboratory/faq.html#disallowed-activities"
+
+// freeTierNotice says what Colab allows free runtimes, for free accounts.
+func freeTierNotice(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c.Key("free-tier")).Gap(6).Padding(10, 12).Radius(8).Border(1, t.Warning).Children(func() {
+		ui.Text(c, i18n.T("free.title")).Bold().FontSize(13)
+		ui.Text(c, i18n.T("free.text")).FontSize(13).TextColor(t.TextMuted)
+		ui.Row(c).Children(func() {
+			if labeledButton(c, iconExternal, i18n.T("free.faq"), false).Clicked() {
+				openURL(colabFAQ)
+			}
+		})
+	})
 }
 
 func openURL(u string) {
