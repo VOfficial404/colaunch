@@ -120,6 +120,14 @@ func (l Llama) Validate(ctx context.Context, values map[string]string, hfToken s
 	if err != nil {
 		return nil, err
 	}
+	// Image and video models come as GGUF too, for ComfyUI: refuse them
+	// now, before a GPU is assigned for nothing. A mirror that doesn't
+	// say what the model is lets it through.
+	if info, err := hf.FetchInfo(ctx, ref.Repo, hfToken); err == nil {
+		if err := info.CheckServable(); err != nil {
+			return nil, fmt.Errorf("%s: %w", ref.Repo, err)
+		}
+	}
 	quants := hf.Quants(files)
 	if len(quants) == 0 {
 		return nil, fmt.Errorf("%s has no GGUF files", ref.Repo)
@@ -275,7 +283,8 @@ func (l Llama) Stop(ctx context.Context, sh *colab.Shell) error {
 	return stopPlugin(ctx, sh, l.ID())
 }
 
-func gb(n int64) float64 { return float64(n) / 1e9 }
+// gb is n bytes in GiB, as GPUs' memory is told: a 40 GB A100 has 40.
+func gb(n int64) float64 { return float64(n) / (1 << 30) }
 
 func atoi(s string, def int) int {
 	n, err := strconv.Atoi(strings.TrimSpace(s))

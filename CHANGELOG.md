@@ -2,6 +2,13 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.4]
+
+- The Deploy page refuses image and video models made for ComfyUI, such as Qwen-Image or FLUX GGUFs, before a GPU is assigned: llama.cpp can't run them. The error says to use the ComfyUI task.
+- Deploy logs no longer show terminal escape codes.
+- GPU memory in the deploy log is in GiB, as GPUs are sold: a 40 GB A100 shows 40.
+- Prebuilt llama.cpp for CUDA builds again, so deploying no longer compiles it on the runtime.
+
 ## [0.1.3]
 
 Notifications

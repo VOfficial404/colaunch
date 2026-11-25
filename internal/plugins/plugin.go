@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -294,7 +295,9 @@ func showNew(env *Env, carry, chunk []byte, recent *[]string) []byte {
 		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
 			l = l[j+1:]
 		}
-		lines[i] = l
+		// Terminal escapes, as tools print for colors and progress, are
+		// noise in the app's log.
+		lines[i] = stripEscapes(l)
 	}
 	// The plugin's script prints its phases.
 	if p := lastPhase(strings.Join(lines, "\n")); p != "" {
@@ -333,6 +336,20 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+var escapes = regexp.MustCompile(`\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])`)
+
+// stripEscapes removes terminal escape sequences and other control
+// characters from a line of log.
+func stripEscapes(s string) string {
+	s = escapes.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // ShellQuote quotes s for bash.

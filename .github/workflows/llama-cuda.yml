@@ -1,5 +1,5 @@
 # Builds llama.cpp's server for CUDA, for the GPUs Colab has (T4, L4, A100,
-# H100, Blackwell), on Colab's Ubuntu, and keeps it in the prerelease
+# H100, and newer ones through PTX), on Colab's Ubuntu, and keeps it in the prerelease
 # "llama-cuda", where the llama plugin downloads it from instead of
 # building llama.cpp on the runtime for minutes. Weekly, to follow
 # llama.cpp, and by hand.
@@ -56,7 +56,7 @@ jobs:
           cmake -S src -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_CUDA=ON \
-            -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;100-real;120-virtual" \
+            -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;90-virtual" \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_NATIVE=OFF \
             -DLLAMA_CURL=OFF \

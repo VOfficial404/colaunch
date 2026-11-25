@@ -230,3 +230,19 @@ func TestSafeExtract(t *testing.T) {
 		}
 	}
 }
+
+// The log lines of a deploy show without the terminal escapes tools print,
+// as they came in a user's log of building llama.cpp.
+func TestStripEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"\x1b[1;49r\x1b[49;1H":                                   "",
+		"\x1b[36;45H@@PHASE llama@@":                             "@@PHASE llama@@",
+		"curl: (22) The requested URL returned error: 404\x1b[K": "curl: (22) The requested URL returned error: 404",
+		"\x1b[1;32mOK\x1b[0m done":                               "OK done",
+		"\x1b]0;title\x07Cloning":                                "Cloning",
+	} {
+		if got := stripEscapes(in); got != want {
+			t.Errorf("stripEscapes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

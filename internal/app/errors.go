@@ -29,6 +29,7 @@ var knownErrors = []knownError{
 	{key: "err.unavailable", next: "err.unavailable_next", match: []string{"no such accelerator is available", "no accelerator is available"}},
 	{key: "err.hf_not_found", next: "err.hf_not_found_next", match: []string{"hf: no such repository"}},
 	{key: "err.too_big", next: "err.too_big_next", match: []string{"no quantization of the model fits"}},
+	{key: "err.not_llm", next: "err.not_llm_next", match: []string{"llama.cpp can't serve"}},
 }
 
 // explainError finds what an error's text means to the user: the i18n

@@ -88,6 +88,9 @@ var dict = map[string][3]string{
 	"login.paste_invalid":            {"Paste the whole address the browser ended on, including state=… and code=….", "请粘贴浏览器最后停留页面的完整地址（含 state=… 和 code=…）。", "請貼上瀏覽器最後停留頁面的完整網址（含 state=… 和 code=…）。"},
 	"accounts.revoke_failed":         {"Couldn't revoke Colaunch's access. Remove it at myaccount.google.com/permissions.", "未能撤销 Colaunch 的访问权限，请到 myaccount.google.com/permissions 手动移除。", "未能撤銷 Colaunch 的存取權，請到 myaccount.google.com/permissions 手動移除。"},
 
+	"err.not_llm":      {"This isn't a language model", "这不是语言模型", "這不是語言模型"},
+	"err.not_llm_next": {"It's an image or video model made for ComfyUI, which llama.cpp can't run. Deploy it with the ComfyUI task under Tasks.", "这是给 ComfyUI 用的图像或视频模型，llama.cpp 跑不了。请到「任务」里用 ComfyUI 任务部署。", "這是給 ComfyUI 用的圖像或影片模型，llama.cpp 無法執行。請到「任務」裡用 ComfyUI 任務部署。"},
+
 	// Durations
 	"dur.days":    {"%dd %dh", "%d 天 %d 小时", "%d 天 %d 小時"},
 	"dur.hours":   {"%dh %02dm", "%d 小时 %02d 分", "%d 小時 %02d 分"},
