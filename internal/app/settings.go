@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/updater"
@@ -146,6 +147,25 @@ func (a *App) settingsPage(c *ui.Context) {
 				}
 			})
 		})
+
+		if isDesktop() || runtime.GOOS == "android" || runtime.GOOS == "ios" {
+			section(c, i18n.T("background.title"), func() {
+				enabled := set.BackgroundEnabled()
+				switchRow(c, &enabled, i18n.T("background.enabled"))
+				if enabled != set.BackgroundEnabled() {
+					set.Background = &enabled
+					a.m.SaveSettings()
+				}
+				help := "background.desktop_help"
+				switch runtime.GOOS {
+				case "android":
+					help = "background.android_help"
+				case "ios":
+					help = "background.ios_help"
+				}
+				ui.Text(c, i18n.T(help)).FontSize(12).TextColor(t.TextMuted)
+			})
+		}
 
 		section(c, i18n.T("client.title"), func() {
 			ui.Text(c, i18n.T("client.text")).FontSize(12).TextColor(t.TextMuted)

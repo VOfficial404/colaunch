@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -51,10 +52,18 @@ type App struct {
 	ports    portsState
 	accounts accountsState
 	settings settingsState
+
+	desktop          desktopBackground
+	mobile           mobileBackground
+	backgroundQueued bool
+	quitting         bool
 }
 
 // Run runs the app until it quits.
 func Run() error {
+	if isDesktop() && !mygo.App.RequestSingleInstanceLock() {
+		return nil
+	}
 	// Updates, in a window of native UI: the app needs no webview.
 	mygo.Use(native.Plugin)
 	mygo.App.SetLanguages(i18n.Languages...)
@@ -63,12 +72,20 @@ func Run() error {
 		return err
 	}
 	m := core.New(dir, newSecrets(dir))
+	defer m.Close()
 	a := &App{m: m, page: pageDeploy}
 	if m.Settings.Language != "" {
 		mygo.App.SetLocale(m.Settings.Language)
 	}
 	m.Lang = i18n.Lang
 	a.deploy.init(m)
+	if isDesktop() {
+		mygo.App.OnSecondInstance(func([]string, string) {
+			if a.win != nil {
+				a.showDesktopWindow()
+			}
+		})
+	}
 	mygo.App.WhenReady(func() {
 		i18n.SetLang(mygo.App.Locale())
 		a.win = mygo.NewWindow(mygo.WindowOptions{
@@ -80,14 +97,26 @@ func Run() error {
 			StateKey:  "main",
 			Content:   ui.View(a.view),
 		})
-		m.Post = func(fn func()) { a.win.Update(fn) }
+		m.Post = func(fn func()) {
+			a.win.Update(func() {
+				fn()
+				if !a.quitting {
+					a.syncMobileBackground()
+				}
+			})
+		}
 		m.Notify = a.notify
+		a.initDesktopBackground()
+		a.initMobileBackground()
 		m.Start()
 	})
-	mygo.App.OnLocaleChanged(func(tag string) { i18n.SetLang(tag) })
-	err = mygo.App.Run()
-	m.Close()
-	return err
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
+	mygo.App.OnQuitCanceled(func() { a.quitting = false })
+	mygo.App.OnLocaleChanged(func(tag string) {
+		i18n.SetLang(tag)
+		a.refreshDesktopBackgroundMenus()
+	})
+	return mygo.App.Run()
 }
 
 // notify shows a toast, from the main thread.
@@ -117,6 +146,31 @@ func (a *App) view(c *ui.Context) {
 	} else {
 		a.wide(c)
 	}
+	a.queueBackgroundSync()
+}
+
+// Settings and tasks can change in a view's click handlers. Apply native
+// background changes after the frame, without requesting another redraw.
+func (a *App) queueBackgroundSync() {
+	if a.win == nil || a.quitting || a.backgroundQueued {
+		return
+	}
+	mobile := runtime.GOOS == "ios" || runtime.GOOS == "android"
+	if !mobile && (!isDesktop() || a.desktop.enabled == a.m.Settings.BackgroundEnabled()) {
+		return
+	}
+	a.backgroundQueued = true
+	mygo.App.WhenReady(func() {
+		a.backgroundQueued = false
+		if a.quitting {
+			return
+		}
+		if mobile {
+			a.syncMobileBackground()
+		} else {
+			a.syncDesktopBackground()
+		}
+	})
 }
 
 func (a *App) theme(c *ui.Context) {

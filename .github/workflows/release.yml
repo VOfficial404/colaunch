@@ -1,6 +1,6 @@
 # Builds Colaunch for macOS, Windows, Linux, Android and iOS when a tag v*
-# is pushed, and publishes them in a GitHub release once the desktop and
-# Android builds are in. Running it by hand does the same for the version
+# is pushed, and publishes them in a GitHub release once all five
+# platforms' builds are in. Running it by hand does the same for the version
 # in mygo.json, tagging the commit when the tag isn't there yet.
 #
 # Secrets it uses, all optional:
@@ -145,6 +145,12 @@ jobs:
           MYGO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           MYGO_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: go tool mygo build -platform android
+      - name: Verify background service in the APK
+        run: |
+          aapt="$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -n 1)"
+          "$aapt" dump xmltree build/android/*.apk AndroidManifest.xml > "$RUNNER_TEMP/colaunch-manifest.txt"
+          grep -F 'dev.mygo.ColaunchBackgroundService' "$RUNNER_TEMP/colaunch-manifest.txt"
+          grep -F 'android.permission.FOREGROUND_SERVICE_DATA_SYNC' "$RUNNER_TEMP/colaunch-manifest.txt"
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
@@ -234,7 +240,7 @@ jobs:
 
   publish:
     needs: [draft-release, desktop, android, ios]
-    if: ${{ !cancelled() && needs.desktop.result == 'success' && needs.android.result == 'success' }}
+    if: ${{ !cancelled() && needs.desktop.result == 'success' && needs.android.result == 'success' && needs.ios.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - env:

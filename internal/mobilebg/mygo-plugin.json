@@ -1,0 +1,17 @@
+{
+  "mobile": {
+    "id": "colaunchMobileBackground",
+    "ios": {
+      "sources": ["ios/MobileBackgroundPlugin.swift"],
+      "class": "ColaunchMobileBackgroundPlugin"
+    },
+    "android": {
+      "sources": ["android/MobileBackgroundPlugin.kt"],
+      "class": "ColaunchMobileBackgroundPlugin",
+      "permissions": ["FOREGROUND_SERVICE", "FOREGROUND_SERVICE_DATA_SYNC", "POST_NOTIFICATIONS"],
+      "application": [
+        "<service android:name=\"dev.mygo.ColaunchBackgroundService\" android:exported=\"false\" android:foregroundServiceType=\"dataSync\" />"
+      ]
+    }
+  }
+}

@@ -61,6 +61,16 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 Any OpenAI client works: set its base URL to `http://127.0.0.1:8080/v1`.
 
+## Background operation
+
+Enabled by default. You can turn it off in **Settings → Background operation**.
+
+- **Windows, macOS and Linux.** Closing the window keeps retries, deployments, quota updates and port forwarding running. Reopen Colaunch from the tray or Dock, or launch it again. If the tray is unavailable, Colaunch minimizes to the taskbar. Choose **Quit Colaunch** to stop local background work. Local work pauses when the computer sleeps.
+- **Android.** A foreground service covers active runtimes and deployment retries. Allow notifications to reopen Colaunch from its ongoing notification. The service stops when the last task ends. Android 15 and later limit the time a `dataSync` service can run in the background. Opening the app lets the service resume.
+- **iOS.** Colaunch requests a short extension for ongoing work. Local retries and port forwarding pause when iOS suspends the app. Returning to Colaunch continues pending retries and checks runtime connections. If iOS terminates the process or you force-quit it, Colaunch can reconnect to saved runtimes on launch. Start any pending GPU request again.
+
+The schedule and idle timeouts already installed on a Colab runtime run independently.
+
 ## How it works
 
 ```

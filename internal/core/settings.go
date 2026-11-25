@@ -31,6 +31,8 @@ type Settings struct {
 	Language string `json:"language"`
 	// Theme is "system", "light" or "dark".
 	Theme string `json:"theme"`
+	// Background is enabled by default, including for settings saved before it existed.
+	Background *bool `json:"background,omitempty"`
 	// OAuth is the client accounts sign in with.
 	OAuth google.Client `json:"oauth"`
 	// HFEndpoint is Hugging Face's address, for mirrors.
@@ -47,6 +49,10 @@ type Settings struct {
 	KeepFailed bool `json:"keep_failed"`
 	// Deploy is the deploy form as it was last.
 	Deploy DeployForm `json:"deploy"`
+}
+
+func (s Settings) BackgroundEnabled() bool {
+	return s.Background == nil || *s.Background
 }
 
 // DeployForm is what the Deploy page asks.

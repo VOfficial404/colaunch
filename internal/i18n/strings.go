@@ -25,6 +25,17 @@ var dict = map[string][3]string{
 	"stopped": {"Stopped", "已停止", "已停止"},
 	"loading": {"Loading…", "加载中…", "載入中…"},
 
+	// Background operation
+	"background.title":        {"Background operation", "后台运行", "背景執行"},
+	"background.enabled":      {"Keep working in the background", "在后台继续运行", "在背景繼續執行"},
+	"background.open":         {"Open Colaunch", "打开 Colaunch", "開啟 Colaunch"},
+	"background.quit":         {"Quit Colaunch", "退出 Colaunch", "結束 Colaunch"},
+	"background.desktop_help": {"Closing the window keeps deployments, retries and port forwards running. Reopen from the tray or Dock, or choose Quit Colaunch to exit.", "关闭窗口后，部署、重试和端口转发会继续运行。可通过托盘、程序坞或再次打开 Colaunch 返回。要结束后台运行，请选择退出 Colaunch。", "關閉視窗後，部署、重試與連接埠轉送會繼續執行。可透過系統匣、Dock 或再次開啟 Colaunch 返回。若要結束背景執行，請選擇結束 Colaunch。"},
+	"background.android_help": {"Active runtimes and deployment retries use a foreground service. Allow notifications to see the service and tap it to reopen Colaunch. Android may limit how long it runs.", "运行时和部署重试通过前台服务继续运行。允许通知后，可以点通知返回 Colaunch。Android 会限制服务的后台运行时长。", "執行階段與部署重試透過前景服務繼續執行。允許通知後，可點選通知返回 Colaunch。Android 會限制服務的背景執行時間。"},
+	"background.ios_help":     {"iOS grants a short period to continue active work. Bring Colaunch back to the foreground to continue retries and reconnect to running runtimes.", "iOS 只给正在进行的任务短暂的后台时间。返回 Colaunch 后会继续仍在等待的重试，并检查运行时连接。", "iOS 只給進行中的工作短暫的背景時間。返回 Colaunch 後會繼續仍在等待的重試，並檢查執行階段連線。"},
+	"background.notification": {"Keeping Colab work and port forwards active", "正在后台运行 Colab 任务和端口转发", "正在背景執行 Colab 工作與連接埠轉送"},
+	"background.unavailable":  {"Could not start background operation", "无法启用后台运行", "無法啟用背景執行"},
+
 	// Durations
 	"dur.days":    {"%dd %dh", "%d 天 %d 小时", "%d 天 %d 小時"},
 	"dur.hours":   {"%dh %02dm", "%d 小时 %02d 分", "%d 小時 %02d 分"},

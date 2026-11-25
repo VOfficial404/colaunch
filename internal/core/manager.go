@@ -108,6 +108,16 @@ func (m *Manager) Start() {
 	go m.loop()
 }
 
+// RefreshConnections checks live sessions when the app returns to the foreground.
+// Call it from the main thread.
+func (m *Manager) RefreshConnections() {
+	for _, s := range m.Sessions {
+		if s.Phase == PhaseRunning {
+			go m.watch(s)
+		}
+	}
+}
+
 // Close stops the manager's work, leaving the runtimes running: their
 // watchdogs keep their limits.
 func (m *Manager) Close() {

@@ -58,6 +58,24 @@ func TestCheckBalanceStops(t *testing.T) {
 	}
 }
 
+// Older settings default to background operation, and an explicit opt-out
+// survives restarting the app.
+func TestBackgroundSettingPersistsOptOut(t *testing.T) {
+	dir := t.TempDir()
+	m := New(dir, mapSecrets{})
+	defer m.Close()
+	if !m.Settings.BackgroundEnabled() {
+		t.Fatal("background operation is disabled before a choice is saved")
+	}
+	m.Settings.Background = new(false)
+	m.SaveSettings()
+	restarted := New(dir, mapSecrets{})
+	defer restarted.Close()
+	if restarted.Settings.BackgroundEnabled() {
+		t.Fatal("background operation was reenabled after restarting")
+	}
+}
+
 func TestMachineSpec(t *testing.T) {
 	got := Machine{Variant: "gpu", Accelerator: "A100", HighMem: true}.Spec()
 	want := colab.Spec{Variant: colab.GPU, Accelerator: "A100", Shape: colab.HighMem}

@@ -2,6 +2,12 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.1]
+
+- Closing the desktop window keeps deployments, retries and port forwards running. Reopen or quit Colaunch from the tray.
+- Android keeps active work in a foreground service. iOS requests short background time and checks runtime connections when the app returns to the foreground.
+- Background operation is enabled by default and can be turned off in Settings.
+
 ## [0.1.0] - 2026-11-25
 
 The first release.
