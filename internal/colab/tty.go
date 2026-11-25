@@ -354,9 +354,11 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 	}
 	cmd := fmt.Sprintf("%s; __s=$?; [ $__s = 0 ] && stty raw -echo; echo \"@@R\"\"EADY-%d:$__s@@\"; "+
 		"if [ $__s = 0 ]; then (set -C; head -c %d | base64 -d > %s); __s=$?; stty sane -echo -onlcr; "+
-		"if [ $__s = 0 ]; then mv -fT %s %s; __s=$?; fi; [ $__s = 0 ] || rm -f %s; fi; "+
+		// A directory in the way would take the file inside it, as mv does
+		// without GNU's -T, which BSD's mv lacks: refuse it instead.
+		"if [ $__s = 0 ]; then if [ -d %s ] && [ ! -L %s ]; then __s=1; else mv -f %s %s; __s=$?; fi; fi; [ $__s = 0 ] || rm -f %s; fi; "+
 		"echo \"@@D\"\"ONE-%d:$__s@@\"\n",
-		prep, n, len(enc), part, part, q, part, n)
+		prep, n, len(enc), part, q, q, part, q, part, n)
 	if err := s.tty.WriteString(cmd); err != nil {
 		return err
 	}
