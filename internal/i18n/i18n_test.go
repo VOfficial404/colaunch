@@ -11,7 +11,7 @@ import (
 var dynamic = []string{
 	"phase.validating", "phase.assigning", "phase.connecting", "phase.retrying", "phase.guarding",
 	"phase.deploying", "phase.forwarding", "phase.running", "phase.reattaching", "phase.stopping",
-	"phase.stopped", "phase.failed",
+	"phase.stopped", "phase.failed", "phase.waiting",
 	"pphase.resolve", "pphase.llama", "pphase.build", "pphase.download", "pphase.start", "pphase.ready",
 	"reason.user", "reason.manual", "reason.schedule", "reason.idle", "reason.budget", "reason.floor",
 	"reason.gone", "reason.failed",

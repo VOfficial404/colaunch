@@ -23,6 +23,7 @@ const (
 	PhaseAssigning   = "assigning"
 	PhaseConnecting  = "connecting"
 	PhaseRetrying    = "retrying"
+	PhaseWaiting     = "waiting"
 	PhaseGuarding    = "guarding"
 	PhaseDeploying   = "deploying"
 	PhaseForwarding  = "forwarding"
@@ -49,7 +50,13 @@ type Session struct {
 	// "budget", "floor", "gone" or "failed".
 	StopReason string
 	Attempt    int
-	StoppedAt  time.Time
+	// Round is the round of grabbing, NextTry when the next one starts,
+	// and TryErr why the last try got nothing.
+	Round     int
+	NextTry   time.Time
+	TryErr    string
+	Grabbing  bool
+	StoppedAt time.Time
 
 	// What goroutines use, behind mu.
 	mu     sync.Mutex
@@ -204,7 +211,8 @@ func (m *Manager) Launch(form DeployForm) (*Session, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	s.cancel = cancel
 	m.Sessions = append(m.Sessions, s)
-	go m.launch(ctx, s, a, p, form.Machine)
+	s.Grabbing = form.Machine.Grab
+	go m.launch(ctx, s, m.grabAccounts(a, form.Machine.AnyAccount), p, form.Machine, m.Settings.MaxAttempts)
 	return s, nil
 }
 
@@ -255,7 +263,8 @@ func (s *Session) Title() string {
 	return name
 }
 
-func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.Plugin, machine Machine) {
+func (m *Manager) launch(ctx context.Context, s *Session, accounts []*Account, p plugins.Plugin, machine Machine, vramTries int) {
+	a := accounts[0]
 	m.logf(s, "%s · %s · %s", p.Name().In(m.Lang()), s.Spec, a.Email)
 	hw, err := p.Validate(ctx, s.Values, m.HFToken())
 	if err != nil {
@@ -267,23 +276,15 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 	}
 
 	minVRAM := int64(machine.MinVRAM * 1024) // MiB
-	attempts := m.Settings.MaxAttempts
-	if minVRAM <= 0 || s.Spec.Variant != colab.GPU {
-		attempts = 1
+	if s.Spec.Variant != colab.GPU {
+		minVRAM = 0
 	}
 	var sh *colab.Shell
 	var st *agent.Status
-	for attempt := 1; ; attempt++ {
-		m.Post(func() { s.Attempt = attempt })
-		m.phase(s, PhaseAssigning)
-		m.logf(s, "Assigning %s (%d/%d)…", s.Spec, attempt, attempts)
-		rt, err := a.Client.CreateRuntime(ctx, s.Spec)
+	try := func(a *Account, spec colab.Spec) error {
+		rt, err := a.Client.CreateRuntime(ctx, spec)
 		if err != nil {
-			if errors.Is(err, colab.ErrTooManyRuntimes) {
-				err = fmt.Errorf("%w: stop one of its runtimes first", err)
-			}
-			m.fail(s, a, err)
-			return
+			return err
 		}
 		s.mu.Lock()
 		s.RuntimeID = rt.ID()
@@ -291,46 +292,57 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		s.mu.Unlock()
 		m.Post(func() { s.RuntimeID = rt.ID(); m.saveState() })
 		m.logf(s, "Assigned runtime %s.", rt.ID())
-
-		m.phase(s, PhaseConnecting)
-		sh, st, err = m.connect(ctx, s, rt.Connection)
-		if err != nil {
-			m.fail(s, a, err)
-			return
-		}
-		vram := st.VRAMMB()
-		gpuName := ""
-		if len(st.GPUs) > 0 {
-			gpuName = st.GPUs[0].Name
-		}
-		m.logf(s, "Machine: %s, %d CPUs, RAM %s, disk free %s.", orNone(gpuName, fmtGB(vram)), st.CPUs, fmtGB(st.Memory.Total>>20), fmtGB(st.Disk.Free>>20))
-		if minVRAM > 0 && vram < minVRAM && s.Spec.Variant == colab.GPU {
-			sh.Close()
-			if attempt >= attempts {
-				m.fail(s, a, fmt.Errorf("got %s of GPU memory %d times, not %s: try again later", fmtGB(vram), attempts, fmtGB(minVRAM)))
-				return
+		release := func() {
+			dctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			if err := a.Client.DeleteRuntime(dctx, rt.ID()); err != nil {
+				m.logf(s, "✗ %s", errText(err))
 			}
-			m.phase(s, PhaseRetrying)
-			m.logf(s, "%s < %s: giving it back and trying again.", fmtGB(vram), fmtGB(minVRAM))
-			if err := a.Client.DeleteRuntime(ctx, rt.ID()); err != nil {
-				m.fail(s, a, err)
-				return
-			}
+			cancel()
 			s.mu.Lock()
 			s.RuntimeID = ""
 			s.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-			continue
+			m.Post(func() { s.RuntimeID = ""; m.saveState() })
+		}
+		m.phase(s, PhaseConnecting)
+		sh2, st2, err := m.connect(ctx, s, rt.Connection)
+		if err != nil {
+			release()
+			return fmt.Errorf("%w: %v", errConnect, err)
+		}
+		vram := st2.VRAMMB()
+		gpuName := ""
+		if len(st2.GPUs) > 0 {
+			gpuName = st2.GPUs[0].Name
+		}
+		m.logf(s, "Machine: %s, %d CPUs, RAM %s, disk free %s.", orNone(gpuName, fmtGB(vram)), st2.CPUs, fmtGB(st2.Memory.Total>>20), fmtGB(st2.Disk.Free>>20))
+		if minVRAM > 0 && vram < minVRAM {
+			sh2.Close()
+			release()
+			return fmt.Errorf("%w: got %s, want %s", errTooLittleVRAM, fmtGB(vram), fmtGB(minVRAM))
 		}
 		m.Post(func() {
-			s.VRAM, s.GPUName, s.Status = vram, gpuName, st
+			s.VRAM, s.GPUName, s.Status = vram, gpuName, st2
 			m.saveState()
 		})
-		break
+		sh, st = sh2, st2
+		return nil
+	}
+	got, err := m.grab(ctx, s, accounts, machine, vramTries, try)
+	if err != nil {
+		m.fail(s, a, err)
+		return
+	}
+	a = got.account
+	m.Post(func() {
+		if a.Quota != nil {
+			s.StartBalance = a.Quota.Balance
+		}
+		m.saveState()
+	})
+	if got.tries > 1 {
+		m.logf(s, "Got %s after %d tries in %s.", got.spec, got.tries, got.waited.Round(time.Second))
+		title, text := s.Title(), fmt.Sprintf("%s · %d × · %s", got.spec, got.tries, got.waited.Round(time.Second))
+		m.Post(func() { m.Notify("grabbed", title, text) })
 	}
 
 	m.phase(s, PhaseGuarding)
@@ -344,7 +356,7 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 	env := &plugins.Env{
 		Values:   s.Values,
 		Shell:    sh,
-		Spec:     s.Spec,
+		Spec:     got.spec,
 		Status:   st,
 		Lang:     m.Lang(),
 		HFToken:  m.HFToken(),

@@ -192,7 +192,7 @@ func (a *App) progress(c *ui.Context, s *core.Session) {
 	steps := []string{core.PhaseValidating, core.PhaseAssigning, core.PhaseConnecting, core.PhaseGuarding, core.PhaseDeploying, core.PhaseForwarding}
 	at := 0
 	for i, p := range steps {
-		if p == s.Phase || (s.Phase == core.PhaseRetrying && p == core.PhaseAssigning) {
+		if p == s.Phase || ((s.Phase == core.PhaseRetrying || s.Phase == core.PhaseWaiting) && p == core.PhaseAssigning) {
 			at = i
 		}
 	}
@@ -202,6 +202,14 @@ func (a *App) progress(c *ui.Context, s *core.Session) {
 		ui.Spinner(c)
 		ui.Text(c, label).FontSize(13)
 	})
+	if s.Grabbing || s.Attempt > 1 {
+		ui.Text(c, i18n.F("grab.status", s.Round, s.Attempt, duration(time.Since(s.Created)))).FontSize(12).TextColor(t.TextMuted)
+		if s.TryErr != "" {
+			ui.Text(c, i18n.F("grab.last", s.TryErr)).FontSize(12).TextColor(t.Warning).SingleLine().Ellipsis("…")
+		}
+		// The countdown and the time waited move every second.
+		c.After(time.Second)
+	}
 	n := len(s.Log)
 	from := max(0, n-4)
 	ui.Column(c).Gap(2).Children(func() {
@@ -374,6 +382,9 @@ func phaseBadge(c *ui.Context, s *core.Session) {
 func phaseText(s *core.Session) string {
 	if s.Phase == core.PhaseDeploying && s.PluginPhase != "" {
 		return i18n.T("phase.deploying") + " · " + i18n.T("pphase."+s.PluginPhase)
+	}
+	if s.Phase == core.PhaseWaiting {
+		return i18n.F("phase.waiting_n", duration(time.Until(s.NextTry)))
 	}
 	if s.Phase == core.PhaseAssigning && s.Attempt > 1 {
 		return i18n.F("phase.assigning_n", s.Attempt)

@@ -95,6 +95,13 @@ func (a *App) notify(kind, title, text string) {
 	if kind == "info" && title != "" && text == "" {
 		text = i18n.T("stopped")
 	}
+	if kind == "grabbed" {
+		kind, text = "success", i18n.F("grab.got", text)
+		// Grabbing can take hours: say so outside the window too.
+		if a.win != nil && !a.win.IsFocused() && mygo.NotificationsSupported() {
+			mygo.NewNotification(mygo.NotificationOptions{Title: title, Body: text}).Show()
+		}
+	}
 	a.toasts = append(a.toasts, ui.Toast{Title: title, Description: text, Type: kind})
 }
 

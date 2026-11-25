@@ -1,6 +1,7 @@
 package app
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
@@ -94,6 +95,7 @@ func (a *App) deployPage(c *ui.Context) {
 		})
 
 		section(c, i18n.T("deploy.hardware"), func() { a.hardware(c, acct) })
+		section(c, i18n.T("deploy.grab"), func() { a.grabForm(c) })
 		section(c, i18n.T("deploy.guards"), func() { a.guardsForm(c, &d.form.Guards, acct) })
 
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Wrap().Children(func() {
@@ -237,6 +239,7 @@ func (a *App) hardware(c *ui.Context, acct *core.Account) {
 		if len(ineligible) > 0 {
 			ui.Text(c, i18n.F("hw.ineligible", strings.Join(ineligible, ", "))).FontSize(12).TextColor(t.TextMuted)
 		}
+		a.fallbacks(c, options)
 	}
 	ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 		ui.Switch(c, &d.form.HighMem).Label(i18n.T("hw.highmem"))
@@ -248,6 +251,72 @@ func (a *App) hardware(c *ui.Context, acct *core.Account) {
 		})
 		ui.Text(c, i18n.T("hw.min_vram_help")).FontSize(12).TextColor(t.TextMuted)
 	}
+}
+
+// fallbacks chooses the accelerators to ask for when the chosen one isn't
+// available, among those of the variant.
+func (a *App) fallbacks(c *ui.Context, options []string) {
+	d := &a.deploy
+	t := c.Theme()
+	var others, kept []string
+	for _, o := range options {
+		if o != d.form.Accelerator {
+			others = append(others, o)
+		}
+	}
+	// They are tried in the order they show.
+	for _, o := range others {
+		if contains(d.form.Fallbacks, o) {
+			kept = append(kept, o)
+		}
+	}
+	d.form.Fallbacks = kept
+	if len(others) == 0 {
+		return
+	}
+	ui.Text(c, i18n.T("hw.fallbacks")).FontSize(13)
+	ui.Row(c).Gap(16).Wrap().Children(func() {
+		for _, o := range others {
+			on := contains(d.form.Fallbacks, o)
+			if ui.Checkbox(c.Key("fallback-"+o), &on, o).Changed() {
+				if on {
+					d.form.Fallbacks = append(d.form.Fallbacks, o)
+				} else {
+					d.form.Fallbacks = slices.DeleteFunc(d.form.Fallbacks, func(x string) bool { return x == o })
+				}
+			}
+		}
+	})
+	ui.Text(c, i18n.T("hw.fallbacks_help")).FontSize(12).TextColor(t.TextMuted)
+}
+
+// grabForm edits how hard to try for a runtime.
+func (a *App) grabForm(c *ui.Context) {
+	d := &a.deploy
+	t := c.Theme()
+	switchRow(c, &d.form.Grab, i18n.T("grab.on"))
+	ui.Text(c, i18n.T("grab.help")).FontSize(12).TextColor(t.TextMuted)
+	if d.form.Grab {
+		if d.form.RetrySeconds < 10 {
+			d.form.RetrySeconds = 30
+		}
+		ui.Grid(c).Columns(2).GapX(16).GapY(12).Children(func() {
+			ui.Field(c, i18n.T("grab.interval"), func() { ui.NumberInput(c, &d.form.RetrySeconds, 10, 3600, 5) })
+			ui.Field(c, i18n.T("grab.max_wait"), func() { ui.NumberInput(c, &d.form.MaxWait, 0, 10080, 10) })
+		})
+	}
+	if len(a.m.Accounts) > 1 {
+		switchRow(c, &d.form.AnyAccount, i18n.T("grab.any_account"))
+		ui.Text(c, i18n.T("grab.any_account_help")).FontSize(12).TextColor(t.TextMuted)
+	}
+}
+
+// switchRow is a switch with its label after it.
+func switchRow(c *ui.Context, on *bool, label string) {
+	ui.Row(c.Key(label)).Gap(10).AlignItems(ui.Center).Children(func() {
+		ui.Switch(c, on).Label(label)
+		ui.Text(c, label).Grow(1).Shrink(1)
+	})
 }
 
 // guardsForm edits the limits on what a runtime costs.

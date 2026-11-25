@@ -70,9 +70,17 @@ func newTestApp(t *testing.T) *App {
 		{Time: time.Now(), Text: "unsloth/gemma-3-12b-it-GGUF: Q6_K, 9.7 GB (GPU 15.0 GB)"},
 		{Time: time.Now(), Text: "Downloading gemma-3-12b-it-Q6_K.gguf"},
 	}
-	m.Sessions = []*core.Session{run, dep}
+	wait := &core.Session{Phase: core.PhaseWaiting, Grabbing: true, Round: 14, Attempt: 41}
+	wait.ID, wait.Account, wait.Plugin = "c3", acct.Email, "llama"
+	wait.Spec = colab.Spec{Variant: colab.GPU, Accelerator: "H100"}
+	wait.Created, wait.NextTry = time.Now().Add(-23*time.Minute), time.Now().Add(18*time.Second)
+	wait.Values = map[string]string{"repo": "unsloth/Llama-3.3-70B-Instruct-GGUF"}
+	wait.TryErr = "colab: no such accelerator is available now: L4"
+	m.Sessions = []*core.Session{run, dep, wait}
 	a := &App{m: m, page: pageDeploy}
 	a.deploy.init(m)
+	a.deploy.form.Grab, a.deploy.form.Fallbacks = true, []string{"L4", "T4"}
+	a.deploy.form.Accelerator = "A100"
 	return a
 }
 

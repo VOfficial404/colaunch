@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"colaunch/internal/colab"
@@ -66,6 +67,32 @@ type Machine struct {
 	// runtime with less is given back and another assigned, as A100s come
 	// with 40 or 80.
 	MinVRAM float64 `json:"min_vram"`
+	// Fallbacks are accelerators to ask for, in order, when Accelerator
+	// isn't available.
+	Fallbacks []string `json:"fallbacks,omitempty"`
+	// Grab keeps asking, round after round, until a runtime is assigned.
+	Grab bool `json:"grab"`
+	// RetrySeconds is the wait between rounds while grabbing.
+	RetrySeconds float64 `json:"retry_seconds"`
+	// MaxWait gives up grabbing after so many minutes, 0 for never.
+	MaxWait float64 `json:"max_wait"`
+	// AnyAccount asks on the other accounts too.
+	AnyAccount bool `json:"any_account"`
+}
+
+// Candidates are the accelerators to ask for, in order.
+func (m Machine) Candidates() []string {
+	first := m.Spec().Accelerator
+	out := []string{first}
+	if first == "NONE" {
+		return out
+	}
+	for _, f := range m.Fallbacks {
+		if f != "" && !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Spec is the Colab spec of the machine.
@@ -113,7 +140,7 @@ func defaultSettings() Settings {
 		Deploy: DeployForm{
 			Plugin:  "llama",
 			Values:  map[string]map[string]string{},
-			Machine: Machine{Variant: "gpu", Accelerator: "T4"},
+			Machine: Machine{Variant: "gpu", Accelerator: "T4", RetrySeconds: 30},
 			Guards:  Guards{IdleStop: 30, StopAfter: 240},
 		},
 	}

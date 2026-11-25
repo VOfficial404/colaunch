@@ -140,6 +140,9 @@ func (m *Manager) RemoveAccount(a *Account) {
 func (m *Manager) Refresh(a *Account) { go m.refreshAccount(a) }
 
 func (m *Manager) refreshAccount(a *Account) {
+	if a.Client == nil {
+		return
+	}
 	m.Post(func() { a.Refreshing = true })
 	ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer cancel()
