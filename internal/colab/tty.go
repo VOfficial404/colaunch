@@ -303,7 +303,9 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	s.n++
 	n := s.n
 	enc := base64.StdEncoding.EncodeToString([]byte(cmd))
-	if len(enc) > 3000 {
+	// Lines a canonical terminal reads are at most 1024 bytes on macOS and
+	// 4096 on Linux: longer commands go up as a file.
+	if len(enc) > 700 {
 		// Lines a terminal reads are at most 4095 bytes long.
 		p := fmt.Sprintf("%s/cmd-%d.sh", s.tmp, n)
 		if err := s.upload(ctx, p, []byte(cmd), true); err != nil {
@@ -348,17 +350,20 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 	q := shellQuote(dst)
 	dir := shellQuote(pathpkg.Dir(dst))
 	part := shellQuote(dst + ".colaunch-" + randHex(8) + ".part")
-	prep := "mkdir -p " + dir
+	// The paths go in once, as variables: canonical terminals cut lines
+	// short, at 1024 bytes on macOS.
+	vars := fmt.Sprintf("__d=%s; __f=%s; __p=%s; ", dir, q, part)
+	prep := "mkdir -p \"$__d\""
 	if private {
-		prep = fmt.Sprintf("(umask 077; mkdir -p %s) && [ -O %s ] && [ ! -L %s ]", dir, dir, dir)
+		prep = "(umask 077; mkdir -p \"$__d\") && [ -O \"$__d\" ] && [ ! -L \"$__d\" ]"
 	}
-	cmd := fmt.Sprintf("%s; __s=$?; [ $__s = 0 ] && stty raw -echo; echo \"@@R\"\"EADY-%d:$__s@@\"; "+
-		"if [ $__s = 0 ]; then (set -C; head -c %d | base64 -d > %s); __s=$?; stty sane -echo -onlcr; "+
+	cmd := fmt.Sprintf("%s%s; __s=$?; [ $__s = 0 ] && stty raw -echo; echo \"@@R\"\"EADY-%d:$__s@@\"; "+
+		"if [ $__s = 0 ]; then (set -C; head -c %d | base64 -d > \"$__p\"); __s=$?; stty sane -echo -onlcr; "+
 		// A directory in the way would take the file inside it, as mv does
 		// without GNU's -T, which BSD's mv lacks: refuse it instead.
-		"if [ $__s = 0 ]; then if [ -d %s ] && [ ! -L %s ]; then __s=1; else mv -f %s %s; __s=$?; fi; fi; [ $__s = 0 ] || rm -f %s; fi; "+
+		"if [ $__s = 0 ]; then if [ -d \"$__f\" ] && [ ! -L \"$__f\" ]; then __s=1; else mv -f \"$__p\" \"$__f\"; __s=$?; fi; fi; [ $__s = 0 ] || rm -f \"$__p\"; fi; "+
 		"echo \"@@D\"\"ONE-%d:$__s@@\"\n",
-		prep, n, len(enc), part, q, q, part, q, part, n)
+		vars, prep, n, len(enc), n)
 	if err := s.tty.WriteString(cmd); err != nil {
 		return err
 	}
