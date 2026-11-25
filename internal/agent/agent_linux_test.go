@@ -2,10 +2,14 @@ package agent
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -59,5 +63,43 @@ func TestStopChecksThePID(t *testing.T) {
 	}
 	if st, err := os.ReadFile("/proc/" + itoa(rec.PID) + "/stat"); err == nil && !strings.Contains(string(st), ") Z ") {
 		t.Errorf("the plugin's process is still running: %s", st)
+	}
+}
+
+// The watchdog sends its notices once, before it gives the runtime back.
+func TestWatchdogNotifiesBeforeUnassign(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	var mu sync.Mutex
+	var order []string
+	done := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, r.URL.Path+" "+string(b))
+		if r.URL.Path == "/unassign" {
+			close(done)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TBE_RUNTIME_ADDR", strings.TrimPrefix(ts.URL, "http://"))
+	writeNotices(t, home, Notices{
+		Reasons:  map[string]string{"schedule": "on schedule"},
+		Requests: []Notice{{Method: "POST", URL: ts.URL + "/hook", Body: `{"r":"{reason}"}`}},
+	})
+	cfg, _ := json.Marshal(Watchdog{StopAt: time.Now().Add(-time.Minute).Unix()})
+	os.WriteFile(filepath.Join(home, "watchdog.json"), cfg, 0o600)
+	if out, err := agent(t, home, "watchdog"); err != nil {
+		t.Fatal(out, err)
+	}
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the watchdog didn't unassign")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 2 || order[0] != `/hook {"r":"on schedule"}` || !strings.HasPrefix(order[1], "/unassign") {
+		t.Errorf("requests %q", order)
 	}
 }

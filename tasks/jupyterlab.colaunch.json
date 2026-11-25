@@ -1,0 +1,43 @@
+{
+  "format": "colaunch-task",
+  "version": 1,
+  "author": "VOfficial404",
+  "manifest": {
+    "id": "jupyter-lab",
+    "name": {
+      "en": "JupyterLab",
+      "zh-Hans": "JupyterLab",
+      "zh-Hant": "JupyterLab"
+    },
+    "description": {
+      "en": "JupyterLab on the runtime, at 127.0.0.1:8888.",
+      "zh-Hans": "在运行时上启动 JupyterLab，映射到 127.0.0.1:8888。",
+      "zh-Hant": "在執行階段上啟動 JupyterLab，對應到 127.0.0.1:8888。"
+    },
+    "fields": [
+      {
+        "key": "token",
+        "label": {
+          "en": "Token",
+          "zh-Hans": "访问令牌",
+          "zh-Hant": "存取權杖"
+        },
+        "kind": "password",
+        "default": "colaunch"
+      }
+    ],
+    "ports": [
+      {
+        "name": "JupyterLab",
+        "remote": 8888,
+        "local": 8888,
+        "kind": "web",
+        "path": "/lab"
+      }
+    ],
+    "ready": "curl -sf -o /dev/null http://127.0.0.1:8888/api",
+    "timeout_minutes": 10
+  },
+  "script": "# JupyterLab on the runtime, at 127.0.0.1:8888. Fields arrive as COLAUNCH_<KEY>.\nset -euo pipefail\n( while true; do touch \"$COLAUNCH_BUSY\"; sleep 30; done ) &\nBUSY=$!\ntrap 'kill \"$BUSY\" 2>/dev/null || true' EXIT\n\necho \"@@PHASE install@@\"\npython3 -m pip install -q jupyterlab\nkill \"$BUSY\" 2>/dev/null || true\ntrap - EXIT\necho \"@@PHASE start@@\"\n# Colab runs as root, which Jupyter refuses without --allow-root.\nexec jupyter lab --no-browser --allow-root --ip=127.0.0.1 --port=8888 \\\n  --ServerApp.token=\"$COLAUNCH_TOKEN\" --ServerApp.root_dir=/content\n",
+  "readme": "# JupyterLab\n\nInstalls JupyterLab with pip and serves /content on 127.0.0.1:8888, behind the token of the field.\n"
+}

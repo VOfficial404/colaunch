@@ -13,6 +13,7 @@ import (
 	"colaunch/internal/colab"
 	"colaunch/internal/google"
 	"colaunch/internal/hf"
+	"colaunch/internal/notify"
 	"colaunch/internal/plugins"
 )
 
@@ -43,6 +44,9 @@ type Manager struct {
 	Notify func(kind, title, text string)
 	// Lang is the language plugins write their messages in.
 	Lang func() string
+	// Alert, when set, hears each notice as it goes to the channels,
+	// without secrets; any channel's sending is done apart.
+	Alert func(event, title, body string)
 
 	Settings Settings
 	Accounts []*Account
@@ -54,6 +58,8 @@ type Manager struct {
 	cancel context.CancelFunc
 	http   *http.Client
 	work   workState
+	// notifier sends notices to the channels.
+	notifier *notify.Dispatcher
 }
 
 // New loads the manager's state from dir. Call Start once Post works.
@@ -66,6 +72,7 @@ func New(dir string, secrets Secrets) *Manager {
 		Lang:     func() string { return "en" },
 		Settings: defaultSettings(),
 		http:     &http.Client{Timeout: 60 * time.Second},
+		notifier: notify.NewDispatcher(),
 	}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	// The plugins first: their fields say which values are kept in Secrets.

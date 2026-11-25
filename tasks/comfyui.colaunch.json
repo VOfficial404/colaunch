@@ -1,0 +1,77 @@
+{
+  "format": "colaunch-task",
+  "version": 1,
+  "author": "VOfficial404",
+  "manifest": {
+    "id": "comfyui",
+    "name": {
+      "en": "ComfyUI",
+      "zh-Hans": "ComfyUI",
+      "zh-Hant": "ComfyUI"
+    },
+    "description": {
+      "en": "Node-based image generation, at 127.0.0.1:8188. Colab may end free-tier runtimes that run image-generation UIs: a paid plan is safer.",
+      "zh-Hans": "节点式图像生成，映射到 127.0.0.1:8188。Colab 可能终止运行图像生成界面的免费运行时，建议使用付费方案。",
+      "zh-Hant": "節點式影像生成，對應到 127.0.0.1:8188。Colab 可能終止執行影像生成介面的免費執行階段，建議使用付費方案。"
+    },
+    "variant": "VARIANT_GPU",
+    "fields": [
+      {
+        "key": "checkpoint",
+        "label": {
+          "en": "Checkpoint URL",
+          "zh-Hans": "模型下载地址",
+          "zh-Hant": "模型下載網址"
+        },
+        "help": {
+          "en": "A .safetensors to download into models/checkpoints; leave empty to add models yourself.",
+          "zh-Hans": "下载到 models/checkpoints 的 .safetensors；留空则自行添加模型。",
+          "zh-Hant": "下載到 models/checkpoints 的 .safetensors；留空則自行加入模型。"
+        },
+        "kind": "text",
+        "placeholder": "https://huggingface.co/…/model.safetensors"
+      },
+      {
+        "key": "preview",
+        "label": {
+          "en": "Previews",
+          "zh-Hans": "预览方式",
+          "zh-Hant": "預覽方式"
+        },
+        "kind": "select",
+        "options": [
+          "auto",
+          "latent2rgb",
+          "taesd",
+          "none"
+        ],
+        "default": "auto",
+        "advanced": true
+      },
+      {
+        "key": "lowvram",
+        "label": {
+          "en": "Low VRAM mode",
+          "zh-Hans": "低显存模式",
+          "zh-Hant": "低顯示記憶體模式"
+        },
+        "kind": "switch",
+        "default": "false",
+        "advanced": true
+      }
+    ],
+    "ports": [
+      {
+        "name": "ComfyUI",
+        "remote": 8188,
+        "local": 8188,
+        "kind": "web",
+        "path": "/"
+      }
+    ],
+    "ready": "curl -sf -o /dev/null http://127.0.0.1:8188/",
+    "timeout_minutes": 40
+  },
+  "script": "# ComfyUI on the runtime, at 127.0.0.1:8188. Fields arrive as COLAUNCH_<KEY>.\nset -euo pipefail\n# Installing and downloading serve nothing: keep the idle watchdog away.\n( while true; do touch \"$COLAUNCH_BUSY\"; sleep 30; done ) &\nBUSY=$!\ntrap 'kill \"$BUSY\" 2>/dev/null || true' EXIT\n\necho \"@@PHASE install@@\"\nif [ ! -d ComfyUI/.git ]; then\n  git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git\nfi\n# Colab's Python already has PyTorch for its GPU, which requirements.txt keeps.\npython3 -m pip install -q -r ComfyUI/requirements.txt\n\nif [ -n \"${COLAUNCH_CHECKPOINT:-}\" ]; then\n  echo \"@@PHASE download@@\"\n  mkdir -p ComfyUI/models/checkpoints\n  name=$(basename \"${COLAUNCH_CHECKPOINT%%\\?*}\")\n  case \"$name\" in\n    *.safetensors|*.ckpt|*.pt|*.pth|*.bin) ;;\n    *) name=checkpoint.safetensors ;;\n  esac\n  dest=\"ComfyUI/models/checkpoints/$name\"\n  if [ ! -s \"$dest\" ]; then\n    wget -q --show-progress --progress=bar:force:noscroll -O \"$dest.part\" \"$COLAUNCH_CHECKPOINT\"\n    mv \"$dest.part\" \"$dest\"\n  fi\nfi\n\nkill \"$BUSY\" 2>/dev/null || true\ntrap - EXIT\nargs=(--listen 127.0.0.1 --port 8188 --preview-method \"${COLAUNCH_PREVIEW:-auto}\")\nif [ \"${COLAUNCH_LOWVRAM:-false}\" = true ]; then\n  args+=(--lowvram)\nfi\ncd ComfyUI\necho \"@@PHASE start@@\"\nexec python3 main.py \"${args[@]}\"\n",
+  "readme": "# ComfyUI\n\nClones [ComfyUI](https://github.com/comfyanonymous/ComfyUI) on the runtime, installs its requirements with pip, optionally downloads one checkpoint, and serves it on 127.0.0.1:8188, forwarded to the same port here.\n\n**Free tier:** Colab's free tier may end runtimes that run image-generation interfaces, and forbids generating deepfakes. Use a paid plan, and follow Colab's rules: https://research.google.com/colaboratory/faq.html#disallowed-activities\n"
+}

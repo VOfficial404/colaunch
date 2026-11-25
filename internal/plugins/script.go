@@ -38,17 +38,20 @@ import (
 type Manifest struct {
 	ID          string  `json:"id"`
 	Name        Text    `json:"name"`
-	Description Text    `json:"description"`
-	Script      string  `json:"script"`
-	Fields      []Field `json:"fields"`
-	Ports       []Port  `json:"ports"`
-	Ready       string  `json:"ready"`
-	Timeout     float64 `json:"timeout_minutes"`
-	Variant     string  `json:"variant"`
-	Model       string  `json:"model"`
+	Description Text    `json:"description,omitempty"`
+	Script      string  `json:"script,omitempty"`
+	Fields      []Field `json:"fields,omitempty"`
+	Ports       []Port  `json:"ports,omitempty"`
+	Ready       string  `json:"ready,omitempty"`
+	Timeout     float64 `json:"timeout_minutes,omitempty"`
+	Variant     string  `json:"variant,omitempty"`
+	Model       string  `json:"model,omitempty"`
+	// ModelField names the field whose value is the model name the
+	// in-app chat sends, in place of Model, as a model to pull.
+	ModelField string `json:"model_field,omitempty"`
 	// HFToken asks for the Hugging Face token of the settings, as
 	// HF_TOKEN. Plugins don't get it otherwise.
-	HFToken bool `json:"hf_token"`
+	HFToken bool `json:"hf_token,omitempty"`
 }
 
 // UnmarshalJSON lets a Text be a plain string.
@@ -70,8 +73,16 @@ func (t *Text) UnmarshalJSON(b []byte) error {
 type ScriptPlugin struct {
 	Dir      string
 	Manifest Manifest
-	script   string
+	// Meta is who wrote the task and where it was imported from, from
+	// the folder's task.json; zero for a task written here.
+	Meta Meta
+	// Readme is the folder's README.md, "" without one.
+	Readme string
+	script string
 }
+
+// Script is the plugin's bash script, as its file holds it.
+func (p *ScriptPlugin) Script() string { return p.script }
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_\-]{0,40}$`)
 
@@ -158,6 +169,18 @@ func LoadScriptPlugin(dir string) (*ScriptPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
+	var meta Meta
+	if b, err := readOptional(dir, metaFile); err != nil {
+		return nil, err
+	} else if b != nil {
+		if err := json.Unmarshal(b, &meta); err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", dir, metaFile, err)
+		}
+	}
+	readme, err := readOptional(dir, "README.md")
+	if err != nil {
+		return nil, err
+	}
 	if len(m.Name) == 0 {
 		m.Name = Text{"en": m.ID}
 	}
@@ -177,7 +200,7 @@ func LoadScriptPlugin(dir string) (*ScriptPlugin, error) {
 			m.Ports[i].Kind = PortTCP
 		}
 	}
-	return &ScriptPlugin{Dir: dir, Manifest: m, script: string(script)}, nil
+	return &ScriptPlugin{Dir: dir, Manifest: m, Meta: meta, Readme: string(readme), script: string(script)}, nil
 }
 
 // LoadDir registers the plugins in the folders of dir, replacing those
@@ -198,7 +221,8 @@ func LoadDir(dir string) []error {
 	}
 	var errs []error
 	for _, e := range entries {
-		if !e.IsDir() {
+		// Folders whose name starts with a dot are tasks being installed.
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		p, err := LoadScriptPlugin(filepath.Join(dir, e.Name()))
@@ -248,7 +272,11 @@ func (p *ScriptPlugin) Deploy(ctx context.Context, env *Env) (*Result, error) {
 	}
 	env.Phase("ready")
 	ports := append([]Port(nil), p.Manifest.Ports...)
-	return &Result{Ports: ports, Model: p.Manifest.Model}, nil
+	model := p.Manifest.Model
+	if k := p.Manifest.ModelField; k != "" && strings.TrimSpace(env.Values[k]) != "" {
+		model = strings.TrimSpace(env.Values[k])
+	}
+	return &Result{Ports: ports, Model: model}, nil
 }
 
 // scriptFor is the script that runs on the runtime: the fields as
@@ -288,31 +316,4 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// Example is a plugin users can start from, written into the plugins
-// folder when it's empty.
-var Example = map[string]string{
-	"plugin.json": `{
-  "id": "jupyter-lab",
-  "name": {"en": "JupyterLab", "zh-Hans": "JupyterLab", "zh-Hant": "JupyterLab"},
-  "description": {
-    "en": "An example plugin: JupyterLab on the runtime, at 127.0.0.1:8888.",
-    "zh-Hans": "示例插件：在运行时上启动 JupyterLab，映射到 127.0.0.1:8888。",
-    "zh-Hant": "範例外掛：在執行階段上啟動 JupyterLab，對應到 127.0.0.1:8888。"
-  },
-  "script": "run.sh",
-  "fields": [
-    {"key": "token", "label": {"en": "Token", "zh-Hans": "访问令牌", "zh-Hant": "存取權杖"}, "kind": "password", "default": "colaunch"}
-  ],
-  "ports": [{"name": "JupyterLab", "remote": 8888, "local": 8888, "kind": "web", "path": "/lab"}],
-  "ready": "curl -sf -o /dev/null http://127.0.0.1:8888/api",
-  "timeout_minutes": 10
-}
-`,
-	"run.sh": `# Runs on the runtime. Fields arrive as COLAUNCH_<KEY>.
-pip install -q jupyterlab
-exec jupyter lab --no-browser --ip=127.0.0.1 --port=8888 \
-  --ServerApp.token="$COLAUNCH_TOKEN" --ServerApp.root_dir=/content
-`,
 }

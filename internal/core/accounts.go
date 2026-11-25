@@ -28,6 +28,10 @@ type Account struct {
 	// asking is true while a refresh asks Colab, so that refreshes don't
 	// pile up.
 	asking atomic.Bool
+	// lowAlerted is true while the balance is under the notices'
+	// threshold, once noticed; hadBalance once it was more than 0.
+	// Main thread.
+	lowAlerted, hadBalance bool
 }
 
 func (m *Manager) newAccount(r accountRecord, tok *google.Token) *Account {
@@ -174,6 +178,9 @@ func (m *Manager) refreshAccount(a *Account) {
 	m.Post(func() {
 		a.Refreshing = false
 		if errors.Is(qerr, google.ErrRevoked) {
+			if !a.SignedOut {
+				m.alertSignedOut(a)
+			}
 			a.SignedOut = true
 		}
 		if qerr != nil {
@@ -190,6 +197,7 @@ func (m *Manager) refreshAccount(a *Account) {
 			a.Runtimes = rts
 		}
 		m.checkBalance(a)
+		m.checkLowBalance(a)
 	})
 }
 

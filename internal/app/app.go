@@ -21,6 +21,7 @@ import (
 
 	"colaunch/internal/core"
 	"colaunch/internal/i18n"
+	"colaunch/internal/plugins"
 )
 
 // Version is the app's version, set at build time.
@@ -56,6 +57,7 @@ type App struct {
 	ports    portsState
 	accounts accountsState
 	settings settingsState
+	tasks    tasksState
 	// details are the errors whose details are open, by notice.
 	details map[string]bool
 
@@ -85,6 +87,14 @@ func Run() error {
 	}
 	m.Lang = i18n.Lang
 	a.deploy.init(m)
+	// colaunch://import links, which open the task they name for review.
+	mygo.App.OnOpenURL(a.onOpenURL)
+	if isDesktop() && runtime.GOOS != "darwin" && Version != "dev" && !mygo.App.IsURLSchemeRegistered(plugins.DeepLinkScheme) {
+		// Installers register the scheme; a portable copy does it here.
+		if err := mygo.App.RegisterURLScheme(plugins.DeepLinkScheme); err != nil {
+			log.Printf("register %s://: %v", plugins.DeepLinkScheme, err)
+		}
+	}
 	if isDesktop() {
 		mygo.App.OnSecondInstance(func([]string, string) {
 			if a.win != nil {
@@ -118,6 +128,10 @@ func Run() error {
 		a.initDesktopBackground()
 		a.initMobileBackground()
 		m.Start()
+		if link := a.tasks.pendingLink; link != "" {
+			a.tasks.pendingLink = ""
+			a.win.Update(func() { a.openLink(link) })
+		}
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
 	mygo.App.OnQuitCanceled(func() { a.quitting = false })
@@ -219,7 +233,7 @@ var navItems = []navItem{
 	{pageChat, iconChat, "nav.chat"},
 	{pagePorts, iconCable, "nav.ports"},
 	{pageAccounts, iconUsers, "nav.accounts"},
-	{pagePlugins, iconPuzzle, "nav.plugins"},
+	{pagePlugins, iconPuzzle, "nav.tasks"},
 	{pageSettings, iconSettings, "nav.settings"},
 }
 
@@ -304,7 +318,7 @@ func (a *App) content(c *ui.Context) {
 	case pageAccounts:
 		a.accountsPage(c)
 	case pagePlugins:
-		a.pluginsPage(c)
+		a.tasksPage(c)
 	case pageSettings:
 		a.settingsPage(c)
 	}

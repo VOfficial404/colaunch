@@ -1,8 +1,6 @@
 package app
 
 import (
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -24,73 +22,6 @@ type settingsState struct {
 	hfURL    string
 	cudaURL  string
 	attempts float64
-}
-
-func (a *App) pluginsPage(c *ui.Context) {
-	t := c.Theme()
-	pageFrame(c, i18n.T("nav.plugins"), a.backToSettings(c), func() {
-		if iconButton(c, iconRefresh, i18n.T("plugins.reload")).Clicked() {
-			a.m.ReloadPlugins()
-		}
-	}, func() {
-		ui.Text(c, i18n.T("plugins.help")).TextColor(t.TextMuted).FontSize(13)
-		for _, p := range plugins.All() {
-			card(c.Key(p.ID()), func() {
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					ui.Icon(c, iconPuzzle).TextColor(accent)
-					ui.Text(c, p.Name().In(i18n.Lang())).Bold().Grow(1)
-					if sp, ok := p.(*plugins.ScriptPlugin); ok {
-						ui.Badge(c, i18n.T("plugins.user"))
-						if iconButton(c, iconFolder, i18n.T("plugins.open_folder")).Clicked() {
-							mygo.Shell.OpenPath(sp.Dir)
-						}
-					} else {
-						ui.Badge(c, i18n.T("plugins.builtin"))
-					}
-				})
-				ui.Text(c, p.Description().In(i18n.Lang())).FontSize(13).TextColor(t.TextMuted)
-				if sp, ok := p.(*plugins.ScriptPlugin); ok && sp.Manifest.HFToken {
-					ui.Text(c, i18n.T("plugins.hf_token")).FontSize(12).TextColor(t.Warning)
-				}
-				if ui.Button(c, i18n.T("plugins.use")).Clicked() {
-					a.deploy.form.Plugin = p.ID()
-					a.page = pageDeploy
-				}
-			})
-		}
-		for _, err := range a.m.PluginErrors {
-			ui.Text(c, err.Error()).TextColor(t.Danger).FontSize(12).Selectable()
-		}
-		ui.Row(c).Gap(8).Wrap().Children(func() {
-			if isDesktop() {
-				if labeledButton(c, iconFolder, i18n.T("plugins.open_folder"), false).Clicked() {
-					dir := a.m.PluginsDir()
-					a.writeExample(dir)
-					mygo.Shell.OpenPath(dir)
-				}
-			}
-			if ui.Button(c, i18n.T("plugins.docs")).Clicked() {
-				openURL("https://github.com/VOfficial404/colaunch/blob/main/docs/plugins.md")
-			}
-		})
-		a.copyable(c, i18n.T("plugins.folder"), a.m.PluginsDir())
-	}, nil)
-}
-
-// writeExample puts the example plugin in the plugins folder when it has
-// none, to start from.
-func (a *App) writeExample(dir string) {
-	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
-		return
-	}
-	ex := filepath.Join(dir, "jupyter-lab")
-	if err := os.MkdirAll(ex, 0o755); err != nil {
-		return
-	}
-	for name, body := range plugins.Example {
-		os.WriteFile(filepath.Join(ex, name), []byte(body), 0o644)
-	}
-	a.m.ReloadPlugins()
 }
 
 var themes = []string{"system", "light", "dark"}
@@ -191,6 +122,8 @@ func (a *App) settingsPage(c *ui.Context) {
 				ui.Text(c, i18n.T(help)).FontSize(12).TextColor(t.TextMuted)
 			})
 		}
+
+		a.notificationsSection(c)
 
 		section(c, i18n.T("client.title"), func() {
 			ui.Text(c, i18n.T("client.text")).FontSize(12).TextColor(t.TextMuted)

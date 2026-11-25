@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "comfyui",
+      "name": {
+        "en": "ComfyUI",
+        "zh-Hans": "ComfyUI",
+        "zh-Hant": "ComfyUI"
+      },
+      "description": {
+        "en": "Node-based image generation, at 127.0.0.1:8188. Colab may end free-tier runtimes that run image-generation UIs: a paid plan is safer.",
+        "zh-Hans": "节点式图像生成，映射到 127.0.0.1:8188。Colab 可能终止运行图像生成界面的免费运行时，建议使用付费方案。",
+        "zh-Hant": "節點式影像生成，對應到 127.0.0.1:8188。Colab 可能終止執行影像生成介面的免費執行階段，建議使用付費方案。"
+      },
+      "author": "VOfficial404",
+      "path": "comfyui.colaunch.json",
+      "tags": [
+        "image",
+        "web",
+        "gpu"
+      ],
+      "sha256": "fbca894fa7ecd8d7f0ad71d8596ddb557c0330fe264af05f83e8bb1dff37fa13"
+    },
+    {
+      "id": "ollama",
+      "name": {
+        "en": "Ollama",
+        "zh-Hans": "Ollama",
+        "zh-Hant": "Ollama"
+      },
+      "description": {
+        "en": "Ollama with a model of its library, as an OpenAI-compatible API at 127.0.0.1:11434/v1 that the in-app chat uses.",
+        "zh-Hans": "用 Ollama 运行其模型库中的模型，在 127.0.0.1:11434/v1 提供 OpenAI 兼容 API，应用内聊天可直接使用。",
+        "zh-Hant": "用 Ollama 執行其模型庫中的模型，在 127.0.0.1:11434/v1 提供 OpenAI 相容 API，應用程式內聊天可直接使用。"
+      },
+      "author": "VOfficial404",
+      "path": "ollama.colaunch.json",
+      "tags": [
+        "llm",
+        "openai",
+        "gpu"
+      ],
+      "sha256": "97116268a07df77c2684f29aea91a1d4a9875e37cd3c5df1b4858b022d7b809e"
+    },
+    {
+      "id": "jupyter-lab",
+      "name": {
+        "en": "JupyterLab",
+        "zh-Hans": "JupyterLab",
+        "zh-Hant": "JupyterLab"
+      },
+      "description": {
+        "en": "JupyterLab on the runtime, at 127.0.0.1:8888.",
+        "zh-Hans": "在运行时上启动 JupyterLab，映射到 127.0.0.1:8888。",
+        "zh-Hant": "在執行階段上啟動 JupyterLab，對應到 127.0.0.1:8888。"
+      },
+      "author": "VOfficial404",
+      "path": "jupyterlab.colaunch.json",
+      "tags": [
+        "notebook",
+        "web"
+      ],
+      "sha256": "05f7ca5b72f0fdda5b0e8c334decf9721e0fce8285145d2c38bab37bf3fe6af0"
+    }
+  ]
+}

@@ -18,6 +18,8 @@ var (
 	// errConnect is a runtime given back because its terminal didn't
 	// answer.
 	errConnect = errors.New("couldn't connect to the runtime")
+	// errGaveUp is grabbing given up, after the most minutes to wait.
+	errGaveUp = errors.New("gave up")
 )
 
 // grabSleep waits between rounds; tests replace it.
@@ -95,7 +97,7 @@ func (m *Manager) grab(ctx context.Context, s *Session, machine Machine, vramTri
 			return grabbed{}, last
 		}
 		if machine.MaxWait > 0 && time.Since(start) >= time.Duration(machine.MaxWait*float64(time.Minute)) {
-			return grabbed{}, fmt.Errorf("gave up after %d tries in %s: %w", attempt, time.Since(start).Round(time.Second), last)
+			return grabbed{}, fmt.Errorf("%w after %d tries in %s: %w", errGaveUp, attempt, time.Since(start).Round(time.Second), last)
 		}
 		next := time.Now().Add(interval)
 		m.Post(func() { s.Phase, s.NextTry = PhaseWaiting, next })

@@ -12,6 +12,9 @@
 #   agent.py prepare ID        make a plugin's folder
 #   agent.py private ID        make a new private folder for a plugin's secrets
 #   agent.py seal PATH         make a file there readable by its owner alone
+#   agent.py notices prepare|seal|clear
+#                              keep the notices the watchdog sends as it stops
+#   agent.py notify REASON     send those notices now
 #
 # The watchdog runs on the runtime, so the limits hold with the app closed.
 # Its files are in folders only their owner can open, and the files it
@@ -39,6 +42,8 @@ STOPPED = os.path.join(HOME, "stopped.json")
 ACTIVITY = os.path.join(HOME, "activity")
 BUSY = os.path.join(HOME, "busy")
 PLUGINS = os.path.join(HOME, "plugins")
+NOTICES_DIR = os.path.join(HOME, "notices")
+NOTICES = os.path.join(NOTICES_DIR, "notices.json")
 
 
 def touch(path):
@@ -498,6 +503,69 @@ def unassign(reason):
         return False
 
 
+def notices(op):
+    """Keeps the requests the app made for the watchdog to send as it
+    stops the runtime: they have the channels' secrets."""
+    if op == "prepare":
+        private_dir(HOME)
+        print(private_dir(NOTICES_DIR))
+    elif op == "seal":
+        st = os.lstat(NOTICES)
+        if not stat.S_ISREG(st.st_mode):
+            sys.exit("%s isn't a file" % NOTICES)
+        os.chmod(NOTICES, 0o600)
+        print("sealed")
+    elif op == "clear":
+        try:
+            os.unlink(NOTICES)
+        except FileNotFoundError:
+            pass
+        print("cleared")
+    else:
+        sys.exit("unknown notices command " + op)
+
+
+def send_notices(reason):
+    """Sends the notices kept, one after another, each given 10 seconds;
+    one that fails stops nothing. Returns how many went."""
+    try:
+        # UTF-8 whatever the locale: the words are in the user's language.
+        with open(NOTICES, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(cfg, dict):
+        return 0
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        # A redirect would take the headers, a token among them, elsewhere.
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    words = (cfg.get("reasons") or {}).get(reason) or reason
+    # Bodies are JSON: the reason goes in as a string's content.
+    esc = json.dumps(words)[1:-1]
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sent = 0
+    for r in cfg.get("requests") or []:
+        try:
+            url = r.get("url") or ""
+            if not url.startswith(("https://", "http://")):
+                continue
+            body = (r.get("body") or "").replace("{reason}", esc).replace("{time}", when)
+            req = urllib.request.Request(url, data=body.encode("utf-8"), method=r.get("method") or "POST")
+            for k, v in (r.get("headers") or {}).items():
+                req.add_header(k, v)
+            with opener.open(req, timeout=10) as resp:
+                resp.read(65536)
+            sent += 1
+        except Exception:  # noqa: BLE001 - a notice never keeps the runtime up
+            pass
+    return sent
+
+
 def busy_now():
     for g in gpus():
         if g["utilization"] >= 10:
@@ -523,6 +591,7 @@ def watchdog():
     for fd in (0, 1, 2):
         os.dup2(devnull, fd)
     touch(ACTIVITY)
+    notified = False
     while True:
         cfg = read_json(CONFIG, {})
         now = time.time()
@@ -539,6 +608,11 @@ def watchdog():
         elif idle and now - mtime(ACTIVITY) >= idle * 60:
             reason = "idle"
         if reason:
+            # Before the runtime goes, and once: with the app closed, no
+            # one else says it stopped.
+            if not notified:
+                notified = True
+                send_notices(reason)
             if unassign(reason):
                 return
             time.sleep(60)
@@ -571,6 +645,10 @@ def main():
         logs(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 200)
     elif cmd == "unassign":
         unassign(sys.argv[2] if len(sys.argv) > 2 else "manual")
+    elif cmd == "notices":
+        notices(sys.argv[2] if len(sys.argv) > 2 else "")
+    elif cmd == "notify":
+        print("sent %d" % send_notices(sys.argv[2] if len(sys.argv) > 2 else "manual"))
     elif cmd == "version":
         print(VERSION)
     else:

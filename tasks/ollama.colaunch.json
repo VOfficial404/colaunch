@@ -1,0 +1,73 @@
+{
+  "format": "colaunch-task",
+  "version": 1,
+  "author": "VOfficial404",
+  "manifest": {
+    "id": "ollama",
+    "name": {
+      "en": "Ollama",
+      "zh-Hans": "Ollama",
+      "zh-Hant": "Ollama"
+    },
+    "description": {
+      "en": "Ollama with a model of its library, as an OpenAI-compatible API at 127.0.0.1:11434/v1 that the in-app chat uses.",
+      "zh-Hans": "用 Ollama 运行其模型库中的模型，在 127.0.0.1:11434/v1 提供 OpenAI 兼容 API，应用内聊天可直接使用。",
+      "zh-Hant": "用 Ollama 執行其模型庫中的模型，在 127.0.0.1:11434/v1 提供 OpenAI 相容 API，應用程式內聊天可直接使用。"
+    },
+    "variant": "VARIANT_GPU",
+    "fields": [
+      {
+        "key": "model",
+        "label": {
+          "en": "Model",
+          "zh-Hans": "模型",
+          "zh-Hant": "模型"
+        },
+        "help": {
+          "en": "A name of ollama.com/library, as qwen3:8b or gemma3:12b.",
+          "zh-Hans": "ollama.com/library 中的名称，如 qwen3:8b、gemma3:12b。",
+          "zh-Hant": "ollama.com/library 中的名稱，如 qwen3:8b、gemma3:12b。"
+        },
+        "kind": "text",
+        "default": "qwen3:8b",
+        "required": true
+      },
+      {
+        "key": "context",
+        "label": {
+          "en": "Context length",
+          "zh-Hans": "上下文长度",
+          "zh-Hant": "上下文長度"
+        },
+        "kind": "number",
+        "default": "8192",
+        "advanced": true
+      },
+      {
+        "key": "keep_alive",
+        "label": {
+          "en": "Keep the model loaded for",
+          "zh-Hans": "模型保持加载时长",
+          "zh-Hant": "模型保持載入時長"
+        },
+        "kind": "text",
+        "default": "30m",
+        "advanced": true
+      }
+    ],
+    "ports": [
+      {
+        "name": "Ollama API",
+        "remote": 11434,
+        "local": 11434,
+        "kind": "openai",
+        "path": "/"
+      }
+    ],
+    "model_field": "model",
+    "ready": "curl -sf -o /dev/null http://127.0.0.1:11434/api/version",
+    "timeout_minutes": 45
+  },
+  "script": "# Ollama on the runtime: an OpenAI-compatible API at 127.0.0.1:11434/v1.\nset -euo pipefail\nPULL=\n( while true; do touch \"$COLAUNCH_BUSY\"; sleep 30; done ) &\nBUSY=$!\ntrap 'kill \"$BUSY\" $PULL 2>/dev/null || true' EXIT\n\necho \"@@PHASE install@@\"\nif ! command -v ollama >/dev/null 2>&1; then\n  # The official installer unpacks a .tar.zst.\n  if ! command -v zstd >/dev/null 2>&1; then\n    apt-get update -qq\n    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zstd >/dev/null\n  fi\n  curl -fsSL https://ollama.com/install.sh | sh\nfi\n\necho \"@@PHASE download@@\"\n# A server of its own, on another port, pulls the model, so that the\n# ready check passes only once the real one serves it.\nOLLAMA_HOST=127.0.0.1:11435 ollama serve >/dev/null 2>&1 &\nPULL=$!\nfor _ in $(seq 60); do\n  curl -sf -o /dev/null http://127.0.0.1:11435/api/version && break\n  sleep 1\ndone\nOLLAMA_HOST=127.0.0.1:11435 ollama pull \"$COLAUNCH_MODEL\"\nkill \"$PULL\"\nwait \"$PULL\" 2>/dev/null || true\n\nkill \"$BUSY\" 2>/dev/null || true\ntrap - EXIT\nexport OLLAMA_HOST=127.0.0.1:11434\nexport OLLAMA_KEEP_ALIVE=\"${COLAUNCH_KEEP_ALIVE:-30m}\"\nif [ -n \"${COLAUNCH_CONTEXT:-}\" ] && [ \"$COLAUNCH_CONTEXT\" != 0 ]; then\n  export OLLAMA_CONTEXT_LENGTH=\"$COLAUNCH_CONTEXT\"\nfi\necho \"@@PHASE start@@\"\nexec ollama serve\n",
+  "readme": "# Ollama\n\nInstalls Ollama with its official installer (https://ollama.com/install.sh, which needs zstd: the script installs it with apt), pulls the model of the field, and serves it on 127.0.0.1:11434. `/v1` is an OpenAI-compatible API: the in-app chat sends the model's name.\n"
+}

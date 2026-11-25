@@ -2,6 +2,20 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.3]
+
+Notifications
+- Get notified on Telegram, Bark, ServerChan, PushPlus, ntfy, Discord or any webhook when a GPU is grabbed, a deployment is ready or fails, a runtime stops (and why), grabbing gives up, the balance drops below a threshold, or an account's sign-in expires. Each channel picks its own events, and has a test button.
+- Telegram can go through your own API address, for networks that can't reach it directly.
+- A channel can also be sent from the runtime itself when its watchdog stops it, so you hear about it with Colaunch closed. Off by default.
+- Channel credentials stay in the system's keychain, and messages never include tokens or keys.
+
+Tasks
+- Plugins are now tasks: create and edit your own in the app, with fields, ports, a readiness check and a script.
+- Share a task as a code, a .colaunch.json file or a link, and import one from any of them, or from colaunch:// links.
+- Every import shows what the task will do first: the script it runs, the ports it forwards and whether it wants your Hugging Face token. Nothing runs until you start it.
+- A community task library, kept in this repository: ComfyUI, Ollama and JupyterLab to start with. Contributions come by pull request.
+
 ## [0.1.2]
 
 Security

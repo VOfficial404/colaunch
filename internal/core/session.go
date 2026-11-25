@@ -312,6 +312,7 @@ func (m *Manager) fail(s *Session, a *Account, err error) {
 	s.closeConns()
 	m.Post(func() {
 		s.Err = errText(err)
+		m.alertFailed(s, err)
 		if keep {
 			s.Phase = PhaseRunning
 			m.Notify("error", s.Title(), s.Err)
@@ -418,6 +419,9 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		title, text := s.Title(), fmt.Sprintf("%s · %d × · %s", got.spec, got.tries, got.waited.Round(time.Second))
 		m.Post(func() { m.Notify("grabbed", title, text) })
 	}
+	if machine.Grab || got.tries > 1 {
+		m.Post(func() { m.alertGrabbed(s, got) })
+	}
 
 	m.phase(s, PhaseGuarding)
 	if err := m.applyWatchdog(ctx, s, a, sh); err != nil {
@@ -449,7 +453,10 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 	m.forwardAll(s, res.Ports, nil)
 	m.phase(s, PhaseRunning)
 	m.logf(s, "✓ Ready.")
-	m.Post(func() { m.Notify("success", s.Title(), s.OpenAI()) })
+	m.Post(func() {
+		m.Notify("success", s.Title(), s.OpenAI())
+		m.alertReady(s)
+	})
 }
 
 func orNone(name, mem string) string {
@@ -543,6 +550,7 @@ func (m *Manager) applyWatchdog(ctx context.Context, s *Session, a *Account, sh 
 		return err
 	}
 	m.peek(func() { s.sentWD = &w })
+	m.applyNotices(ctx, s, sh)
 	if !guarded {
 		return nil
 	}
@@ -649,6 +657,11 @@ func (m *Manager) Stop(s *Session, reason string) {
 			s.Forwards = nil
 			m.saveState()
 			m.Notify("info", s.Title(), "")
+			// A session stopped before it had a runtime stopped nothing
+			// that costs.
+			if id != "" {
+				m.alertStopped(s, false)
+			}
 		})
 		if a != nil {
 			m.refreshAccount(a)
@@ -893,12 +906,15 @@ func (m *Manager) gone(s *Session) {
 		s.Phase = PhaseStopped
 		s.StoppedAt = time.Now()
 		s.StopReason = "gone"
+		byRuntime := false
 		if st := s.Status; st != nil && st.Stopped != nil {
 			s.StopReason = st.Stopped.Reason
+			byRuntime = watchdogReasons[s.StopReason]
 		}
 		s.Forwards = nil
 		m.saveState()
 		m.Notify("info", s.Title(), s.StopReason)
+		m.alertStopped(s, byRuntime)
 	})
 }
 

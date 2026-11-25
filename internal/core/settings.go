@@ -50,6 +50,8 @@ type Settings struct {
 	KeepFailed bool `json:"keep_failed"`
 	// Deploy is the deploy form as it was last.
 	Deploy DeployForm `json:"deploy"`
+	// Notifications are where notices go; their secrets are in Secrets.
+	Notifications Notifications `json:"notifications"`
 }
 
 func (s Settings) BackgroundEnabled() bool {
@@ -288,6 +290,7 @@ func (m *Manager) settingsToSave() Settings {
 			}
 		}
 	}
+	out.Notifications.Channels = m.channelsToSave()
 	return out
 }
 
@@ -312,6 +315,9 @@ func (m *Manager) loadSettingSecrets() (plain bool) {
 			}
 			values[k] = string(b)
 		}
+	}
+	if m.loadChannelSecrets() {
+		plain = true
 	}
 	return plain
 }

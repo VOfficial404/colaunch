@@ -1,0 +1,3 @@
+# The index holds the SHA-256 of each pack as the repository stores it:
+# keep the bytes as they are, without converting line endings.
+*.json -text

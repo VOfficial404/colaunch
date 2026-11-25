@@ -123,6 +123,20 @@ func TestPagesBuild(t *testing.T) {
 						save(t, tt, filepath.Join(shots, fmt.Sprintf("%s-%s-%s-%s.png", it.page, size.name, theme, lang)))
 					}
 				}
+				// The Tasks page's other views.
+				for name, setup := range taskViews(t, a) {
+					a.page = pagePlugins
+					setup()
+					tt.Frame()
+					for _, s := range tt.Texts() {
+						if i18n.Has(s) {
+							t.Errorf("%s %s tasks %s shows the key %q", lang, size.name, name, s)
+						}
+					}
+					if shots != "" && lang != "zh-Hant" && !dark {
+						save(t, tt, filepath.Join(shots, fmt.Sprintf("tasks-%s-%s-%s.png", name, size.name, lang)))
+					}
+				}
 			}
 		}
 	}

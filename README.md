@@ -24,7 +24,7 @@ English · [简体中文](README.zh-CN.md)
 - 💰 **Cost protection** — stop on a schedule and when idle, **enforced on the runtime itself so they hold with the app closed**; plus a spending cap and a balance floor. Balance, burn rate and how long it lasts, live.
 - 👥 **Several Google accounts** — manage them together, switch any time, see every account's balance.
 - 🔌 **Port forwarding** — any port of the runtime on your `127.0.0.1`, through Colab's own connection: no ngrok, no cloudflared, nothing public.
-- 🧩 **Plugins** — deploying a model is just the built-in plugin. Write your own as a `plugin.json` and a bash script ([docs](docs/plugins.md)).
+- 🧩 **Tasks** — deploying a model is just the built-in task. Make your own in the app's editor (a form, ports and a bash script), share it as a file, a share code or a `colaunch://import` link, or install one from the [community library](tasks/). Every imported task shows its full script for review before it installs ([docs](docs/plugins.md)).
 - 🌏 English, 简体中文, 繁體中文 · light and dark.
 
 <p align="center">

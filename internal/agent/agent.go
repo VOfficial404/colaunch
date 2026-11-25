@@ -102,6 +102,50 @@ func SetWatchdog(ctx context.Context, sh *colab.Shell, w Watchdog) error {
 	return nil
 }
 
+// NoticesPath is where the requests the watchdog makes before it stops the
+// runtime are kept, in a folder only its owner opens.
+const NoticesPath = Home + "/notices/notices.json"
+
+// Notice is an HTTP request the watchdog makes before it stops the runtime.
+// The agent puts why it stops in place of "{reason}" in Body, escaped for
+// a JSON string, and the time in place of "{time}".
+type Notice struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+}
+
+// Notices are what the watchdog sends when it stops the runtime.
+type Notices struct {
+	// Reasons are the words for why, by the watchdog's reason:
+	// "schedule", "idle" or "budget".
+	Reasons  map[string]string `json:"reasons"`
+	Requests []Notice          `json:"requests"`
+}
+
+// SetNotices gives the watchdog the requests to make before it stops the
+// runtime, in a file only the runtime's owner reads; none removes it.
+func SetNotices(ctx context.Context, sh *colab.Shell, n Notices) error {
+	if len(n.Requests) == 0 {
+		_, err := agentCmd(ctx, sh, "notices", "clear")
+		return err
+	}
+	dir, err := agentCmd(ctx, sh, "notices", "prepare")
+	if err != nil {
+		return err
+	}
+	if dir+"/notices.json" != NoticesPath {
+		return fmt.Errorf("agent: notices: %q", dir)
+	}
+	b, _ := json.Marshal(n)
+	if err := sh.Upload(ctx, NoticesPath, b); err != nil {
+		return err
+	}
+	_, err = agentCmd(ctx, sh, "notices", "seal")
+	return err
+}
+
 // Status is the runtime's state, as the agent sees it.
 type Status struct {
 	Version string `json:"version"`
