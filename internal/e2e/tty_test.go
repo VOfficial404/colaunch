@@ -66,6 +66,10 @@ func gitBash(t *testing.T) string {
 // fakeColab serves /colab/tty as Colab's proxy does, behind its token.
 func fakeColab(t *testing.T) *colab.Connection {
 	py := python(t)
+	// The shim below is named python3: it must not find itself.
+	if abs, err := exec.LookPath(py); err == nil {
+		py = abs
+	}
 	bin := t.TempDir()
 	// The terminal's python3 is the test's.
 	os.WriteFile(filepath.Join(bin, "python3"), []byte("#!/bin/sh\nexec \""+filepath.ToSlash(py)+"\" \"$@\"\n"), 0o755)
