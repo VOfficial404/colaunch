@@ -1,0 +1,49 @@
+# Runs the tests on every push to main and every pull request, on the three
+# desktop systems. The tunnel's tests run the real agent.py, with the
+# runner's Python.
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux, os: ubuntu-latest, python: python3 }
+          - { name: macOS, os: macos-latest, python: python3 }
+          - { name: Windows, os: windows-latest, python: python }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check the runtime's scripts
+        run: |
+          bash -n internal/plugins/llama.sh
+          ${{ matrix.python }} -m py_compile internal/agent/agent.py
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build -o /dev/null .
+      - name: Test
+        env:
+          COLAUNCH_TEST_PYTHON: ${{ matrix.python }}
+        run: go test ./...

@@ -1,0 +1,66 @@
+# Builds llama.cpp's server for CUDA, for the GPUs Colab has (T4, L4, A100,
+# H100, Blackwell), on Colab's Ubuntu, and keeps it in the prerelease
+# "llama-cuda", where the llama plugin downloads it from instead of
+# building llama.cpp on the runtime for minutes. Weekly, to follow
+# llama.cpp, and by hand.
+#
+# It links CUDA's libraries dynamically: Colab's runtimes have them. Where
+# the binary doesn't run, the plugin builds llama.cpp itself.
+name: llama.cpp for CUDA
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: llama.cpp tag or branch
+        default: master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.6.3-devel-ubuntu22.04
+    steps:
+      - name: Install the tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake ninja-build ca-certificates curl
+      - name: Check out llama.cpp
+        run: git clone --depth 1 --branch "${{ inputs.ref || 'master' }}" https://github.com/ggml-org/llama.cpp src
+      - name: Build
+        run: |
+          cmake -S src -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;100-real;120-virtual" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF
+          cmake --build build --target llama-server -j"$(nproc)"
+      - name: Pack
+        run: |
+          mkdir -p out
+          cp build/bin/llama-server out/
+          (cd src && git rev-parse --short HEAD) > out/VERSION
+          tar -czf llama-cuda-linux-x64.tar.gz -C out .
+          ls -la llama-cuda-linux-x64.tar.gz
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL https://github.com/cli/cli/releases/download/v2.83.0/gh_2.83.0_linux_amd64.tar.gz | tar -xz
+          gh=./gh_2.83.0_linux_amd64/bin/gh
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if ! $gh release view llama-cuda --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            $gh release create llama-cuda --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+              --title "llama.cpp for CUDA (used by the llama plugin)" \
+              --notes "llama-server built for CUDA on Colab's Ubuntu 22.04, which the llama plugin downloads. Rebuilt weekly." \
+              --target "$GITHUB_SHA"
+          fi
+          $gh release upload llama-cuda llama-cuda-linux-x64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"

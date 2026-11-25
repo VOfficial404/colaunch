@@ -1,0 +1,36 @@
+name: Bug report / 问题反馈
+description: Something doesn't work / 有东西不正常
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / 发生了什么
+      description: What you did, what you expected, what happened instead. / 你做了什么，预期是什么，实际发生了什么。
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log / 日志
+      description: The runtime's log from the Runtimes page, with tokens removed. / 运行时页面里的日志（请去掉令牌等敏感信息）。
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Colaunch version / 版本
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform / 平台
+      options: [Windows, macOS, Linux, Android, iOS]
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Runtime / 运行时
+      placeholder: "GPU A100, Colab Pro"

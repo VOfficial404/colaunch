@@ -1,0 +1,232 @@
+package plugins
+
+import (
+	"context"
+	_ "embed"
+	"fmt"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	"colaunch/internal/colab"
+	"colaunch/internal/hf"
+)
+
+//go:embed llama.sh
+var llamaScript string
+
+// LlamaPort is where llama-server listens on the runtime: not 8080, which
+// is Colab's own Jupyter server.
+const LlamaPort = 8765
+
+// DefaultCUDAURL is llama-server built for CUDA by this repository's
+// workflow (.github/workflows/llama-cuda.yml), which saves building it on
+// the runtime.
+var DefaultCUDAURL = "https://github.com/VOfficial404/colaunch/releases/download/llama-cuda/llama-cuda-linux-x64.tar.gz"
+
+// Llama deploys a GGUF model from Hugging Face with llama.cpp's server,
+// which has an OpenAI-compatible API and a web page to chat on.
+type Llama struct{}
+
+func init() { Register(Llama{}) }
+
+func (Llama) ID() string { return "llama" }
+
+func (Llama) Name() Text {
+	return Text{"en": "Deploy a model", "zh-Hans": "部署模型", "zh-Hant": "部署模型"}
+}
+
+func (Llama) Description() Text {
+	return Text{
+		"en":      "Runs a GGUF model from Hugging Face with llama.cpp, picking the best quantization that fits the GPU you got, and serves an OpenAI-compatible API and a chat page.",
+		"zh-Hans": "用 llama.cpp 运行 Hugging Face 上的 GGUF 模型，按分到的显卡自动挑选放得下的最佳量化版本，提供 OpenAI 兼容 API 和网页聊天。",
+		"zh-Hant": "用 llama.cpp 執行 Hugging Face 上的 GGUF 模型，依分配到的顯示卡自動挑選放得下的最佳量化版本，提供 OpenAI 相容 API 與網頁聊天。",
+	}
+}
+
+// QuantOptions are the choices of quantization; "AUTO" picks for the GPU.
+var QuantOptions = []string{"AUTO", "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_K_XL", "IQ4_XS", "Q3_K_M", "Q2_K", "BF16", "F16"}
+
+func (Llama) Fields() []Field {
+	return []Field{
+		{Key: "repo", Kind: FieldText, Required: true, Placeholder: "unsloth/Qwen3-8B-GGUF",
+			Label: Text{"en": "Hugging Face GGUF repository", "zh-Hans": "Hugging Face GGUF 仓库", "zh-Hant": "Hugging Face GGUF 儲存庫"},
+			Help:  Text{"en": "user/name, or its address. Add :Q4_K_M to choose a quantization.", "zh-Hans": "填 用户/仓库 或网址，末尾加 :Q4_K_M 可指定量化。", "zh-Hant": "填 使用者/儲存庫 或網址，末尾加 :Q4_K_M 可指定量化。"}},
+		{Key: "quant", Kind: FieldSelect, Default: "AUTO", Options: QuantOptions,
+			Label: Text{"en": "Quantization", "zh-Hans": "量化版本", "zh-Hant": "量化版本"},
+			Help:  Text{"en": "AUTO picks the best one that fits the machine you get.", "zh-Hans": "AUTO 会按实际分到的机器挑放得下的最佳版本。", "zh-Hant": "AUTO 會依實際分配到的機器挑放得下的最佳版本。"}},
+		{Key: "ctx", Kind: FieldNumber, Default: "8192",
+			Label: Text{"en": "Context length", "zh-Hans": "上下文长度", "zh-Hant": "上下文長度"}},
+		{Key: "parallel", Kind: FieldNumber, Default: "1", Advanced: true,
+			Label: Text{"en": "Parallel requests", "zh-Hans": "并发请求数", "zh-Hant": "並行請求數"}},
+		{Key: "api_key", Kind: FieldPassword, Advanced: true,
+			Label: Text{"en": "API key (optional)", "zh-Hans": "API 密钥（可选）", "zh-Hant": "API 金鑰（選填）"}},
+		{Key: "local_port", Kind: FieldNumber, Default: "8080", Advanced: true,
+			Label: Text{"en": "Local port", "zh-Hans": "本机端口", "zh-Hant": "本機連接埠"}},
+		{Key: "args", Kind: FieldText, Placeholder: "--temp 0.7", Advanced: true,
+			Label: Text{"en": "More llama-server arguments", "zh-Hans": "额外 llama-server 参数", "zh-Hant": "額外 llama-server 參數"}},
+	}
+}
+
+func (l Llama) Validate(ctx context.Context, values map[string]string, hfToken string) (*Hardware, error) {
+	ref, err := hf.ParseRef(values["repo"])
+	if err != nil {
+		return nil, err
+	}
+	files, err := hf.ListFiles(ctx, ref.Repo, hfToken)
+	if err != nil {
+		return nil, err
+	}
+	quants := hf.Quants(files)
+	if len(quants) == 0 {
+		return nil, fmt.Errorf("%s has no GGUF files", ref.Repo)
+	}
+	want := wantQuant(ref, values)
+	smallest := quants[0]
+	for _, q := range quants {
+		if q.Size < smallest.Size {
+			smallest = q
+		}
+		if want != "" && q.Name == want {
+			smallest = q
+			break
+		}
+	}
+	if want != "" && smallest.Name != want {
+		return nil, fmt.Errorf("%s has no %s file", ref.Repo, want)
+	}
+	return &Hardware{Variant: colab.GPU, MinMemory: hf.Need(smallest.Size, atoi(values["ctx"], 8192))}, nil
+}
+
+func wantQuant(ref hf.Ref, values map[string]string) string {
+	if ref.Quant != "" {
+		return ref.Quant
+	}
+	if q := strings.ToUpper(values["quant"]); q != "AUTO" {
+		return q
+	}
+	return ""
+}
+
+func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
+	ref, err := hf.ParseRef(env.Values["repo"])
+	if err != nil {
+		return nil, err
+	}
+	env.Phase("resolve")
+	files, err := hf.ListFiles(ctx, ref.Repo, env.HFToken)
+	if err != nil {
+		return nil, err
+	}
+	quants := hf.Quants(files)
+	ctxLen := atoi(env.Values["ctx"], 8192)
+
+	// The memory the model may take: the GPU's, or else the machine's.
+	gpuMem := env.Status.VRAMMB() << 20
+	ram := env.Status.Memory.Available
+	mem, spill := gpuMem, ram*6/10
+	if gpuMem == 0 {
+		mem, spill = ram*85/100, 0
+	}
+	choice, err := hf.Pick(quants, mem, spill, ctxLen, wantQuant(ref, env.Values))
+	if err != nil {
+		return nil, err
+	}
+	where := "GPU"
+	if gpuMem == 0 {
+		where = "RAM"
+	}
+	env.Log("%s: %s, %.1f GB (%s %.1f GB)", ref.Repo, choice.Name, gb(choice.Size), where, gb(mem))
+	for _, q := range quants {
+		mark := " "
+		if q.Name == choice.Name {
+			mark = "▸"
+		}
+		env.Log("  %s %-8s %6.1f GB  need ≈ %.1f GB", mark, q.Name, gb(q.Size), gb(hf.Need(q.Size, ctxLen)))
+	}
+	if !choice.Fits {
+		env.Log("The model doesn't fit in the GPU alone: some layers run on the CPU, which is slower.")
+	}
+
+	ngl := ""
+	if gpuMem > 0 && choice.Fits {
+		ngl = "999"
+	}
+	gpu := "0"
+	if gpuMem > 0 {
+		gpu = "1"
+	}
+	alias := strings.TrimSuffix(path.Base(ref.Repo), "-GGUF")
+	alias = strings.TrimSuffix(alias, "-gguf")
+	proj := hf.Projector(files)
+	vars := map[string]string{
+		"REPO":        ref.Repo,
+		"FILES":       strings.Join(choice.Files, " "),
+		"MMPROJ":      proj,
+		"CTX":         strconv.Itoa(ctxLen),
+		"NGL":         ngl,
+		"GPU":         gpu,
+		"PORT":        strconv.Itoa(LlamaPort),
+		"API_KEY":     env.Values["api_key"],
+		"ALIAS":       alias,
+		"PARALLEL":    strconv.Itoa(max(1, atoi(env.Values["parallel"], 1))),
+		"EXTRA":       env.Values["args"],
+		"HF_TOKEN":    env.HFToken,
+		"HF_ENDPOINT": hf.Endpoint,
+		"CUDA_URL":    firstNonEmpty(env.Settings["llama_cuda_url"], DefaultCUDAURL),
+	}
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\n")
+	for _, k := range sortedKeys(vars) {
+		fmt.Fprintf(&b, "export L_%s=%s\n", k, ShellQuote(vars[k]))
+	}
+	b.WriteString(llamaScript)
+	if err := runScript(ctx, env, l.ID(), b.String()); err != nil {
+		return nil, err
+	}
+	check := fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/health", LlamaPort)
+	if err := waitReady(ctx, env, l.ID(), 90*time.Minute, check); err != nil {
+		return nil, err
+	}
+	env.Phase("ready")
+	local := atoi(env.Values["local_port"], 8080)
+	info := [][2]string{
+		{"model", alias},
+		{"quant", choice.Name},
+		{"size", fmt.Sprintf("%.1f GB", gb(choice.Size))},
+		{"context", strconv.Itoa(ctxLen)},
+	}
+	if !choice.Fits {
+		info = append(info, [2]string{"offload", "partial"})
+	}
+	return &Result{
+		Ports:  []Port{{Name: "llama-server", Remote: LlamaPort, Local: local, Kind: PortOpenAI, Path: "/"}},
+		Model:  alias,
+		APIKey: env.Values["api_key"],
+		Info:   info,
+	}, nil
+}
+
+func (l Llama) Stop(ctx context.Context, sh *colab.Shell) error {
+	return stopPlugin(ctx, sh, l.ID())
+}
+
+func gb(n int64) float64 { return float64(n) / 1e9 }
+
+func atoi(s string, def int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+func firstNonEmpty(s ...string) string {
+	for _, v := range s {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}

@@ -1,0 +1,212 @@
+package app
+
+import (
+	"fmt"
+	"image/png"
+	"math"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/ui"
+
+	"colaunch/internal/agent"
+	"colaunch/internal/colab"
+	"colaunch/internal/core"
+	"colaunch/internal/i18n"
+	"colaunch/internal/plugins"
+)
+
+type mapSecrets map[string][]byte
+
+func (m mapSecrets) Get(k string) ([]byte, error) { return m[k], nil }
+func (m mapSecrets) Set(k string, v []byte) error { m[k] = v; return nil }
+func (m mapSecrets) Delete(k string) error        { delete(m, k); return nil }
+
+// newTestApp is an app with an account, a model running on an A100 and
+// one still deploying, as the pages show them.
+func newTestApp(t *testing.T) *App {
+	m := core.New(t.TempDir(), mapSecrets{})
+	acct := &core.Account{}
+	acct.Email, acct.Name = "ada@example.com", "Ada"
+	acct.Quota = &colab.Quota{Tier: "PRO", Balance: 87.5, RateHourly: 11.77, FetchedAt: time.Now()}
+	acct.Specs = []colab.RuntimeSpec{
+		{Key: colab.Spec{Variant: colab.GPU, Accelerator: "T4"}, Eligible: true},
+		{Key: colab.Spec{Variant: colab.GPU, Accelerator: "L4"}, Eligible: true},
+		{Key: colab.Spec{Variant: colab.GPU, Accelerator: "A100"}, Eligible: true},
+		{Key: colab.Spec{Variant: colab.GPU, Accelerator: "H100"}, Eligible: false},
+		{Key: colab.Spec{Variant: colab.TPU, Accelerator: "V6E1"}, Eligible: true},
+	}
+	m.Accounts = []*core.Account{acct}
+	m.Settings.ActiveAccount = acct.Email
+
+	run := &core.Session{Phase: core.PhaseRunning}
+	run.ID, run.Account, run.Plugin = "a1", acct.Email, "llama"
+	run.Spec = colab.Spec{Variant: colab.GPU, Accelerator: "A100", Shape: colab.HighMem}
+	run.Created, run.StartBalance = time.Now().Add(-47*time.Minute), 96.7
+	run.GPUName, run.VRAM = "NVIDIA A100-SXM4-80GB", 81920
+	run.Guards = core.Guards{StopAfter: 240, IdleStop: 30, SpendCap: 20}
+	run.Result = &plugins.Result{Model: "Qwen3-32B", Info: [][2]string{{"quant", "Q8_0"}, {"size", "34.8 GB"}, {"context", "16384"}}}
+	st := &agent.Status{CPUs: 12}
+	st.GPUs = append(st.GPUs, struct {
+		Name        string `json:"name"`
+		MemoryTotal int64  `json:"memory_total_mb"`
+		MemoryUsed  int64  `json:"memory_used_mb"`
+		Utilization int    `json:"utilization"`
+	}{"NVIDIA A100-SXM4-80GB", 81920, 41200, 63})
+	st.Memory.Total, st.Memory.Available = 167<<30, 120<<30
+	st.Disk.Total, st.Disk.Free = 235<<30, 160<<30
+	st.Watchdog.LastActivity = float64(time.Now().Add(-3 * time.Minute).Unix())
+	run.Status = st
+	run.Log = []core.LogLine{{Time: time.Now(), Text: "✓ Ready."}}
+
+	dep := &core.Session{Phase: core.PhaseDeploying, PluginPhase: "download"}
+	dep.ID, dep.Account, dep.Plugin = "b2", acct.Email, "llama"
+	dep.Spec = colab.Spec{Variant: colab.GPU, Accelerator: "T4"}
+	dep.Created = time.Now().Add(-4 * time.Minute)
+	dep.Values = map[string]string{"repo": "unsloth/gemma-3-12b-it-GGUF"}
+	dep.Log = []core.LogLine{
+		{Time: time.Now(), Text: "unsloth/gemma-3-12b-it-GGUF: Q6_K, 9.7 GB (GPU 15.0 GB)"},
+		{Time: time.Now(), Text: "Downloading gemma-3-12b-it-Q6_K.gguf"},
+	}
+	m.Sessions = []*core.Session{run, dep}
+	a := &App{m: m, page: pageDeploy}
+	a.deploy.init(m)
+	return a
+}
+
+var sizes = []struct {
+	name string
+	w, h int
+}{{"desktop", 1120, 780}, {"phone", 390, 844}}
+
+// Every page builds at a desktop's size and a phone's, in each language,
+// without the view panicking or showing a key in place of words.
+func TestPagesBuild(t *testing.T) {
+	shots := os.Getenv("COLAUNCH_SHOTS")
+	for _, lang := range i18n.Languages {
+		i18n.SetLang(lang)
+		for _, size := range sizes {
+			for _, dark := range []bool{false, true} {
+				a := newTestApp(t)
+				tt := ui.NewTester(a.view, size.w, size.h)
+				tt.SetDark(dark)
+				for _, it := range navItems {
+					a.page = it.page
+					tt.Frame()
+					for _, s := range tt.Texts() {
+						if i18n.Has(s) {
+							t.Errorf("%s %s %s shows the key %q", lang, size.name, it.page, s)
+						}
+					}
+					if shots != "" && lang != "zh-Hant" {
+						theme := "light"
+						if dark {
+							theme = "dark"
+						}
+						save(t, tt, filepath.Join(shots, fmt.Sprintf("%s-%s-%s-%s.png", it.page, size.name, theme, lang)))
+					}
+				}
+			}
+		}
+	}
+	i18n.SetLang("en")
+}
+
+// The sidebar's items take the user to their pages.
+func TestSidebarNavigates(t *testing.T) {
+	i18n.SetLang("en")
+	a := newTestApp(t)
+	tt := ui.NewTester(a.view, 1120, 780)
+	if err := tt.Click("Accounts"); err != nil {
+		t.Fatal(err)
+	}
+	if a.page != pageAccounts || !tt.HasText("ada@example.com") {
+		t.Errorf("page %s after clicking Accounts", a.page)
+	}
+}
+
+// On a phone the bar of tabs takes the user to the runtimes.
+func TestTabsNavigate(t *testing.T) {
+	i18n.SetLang("en")
+	a := newTestApp(t)
+	tt := ui.NewTester(a.view, 390, 844)
+	if err := tt.Click("Runtimes"); err != nil {
+		t.Fatal(err)
+	}
+	if a.page != pageRuntimes || !tt.HasText("Qwen3-32B") {
+		t.Errorf("page %s, texts %q", a.page, tt.Texts())
+	}
+}
+
+// Switching the machine to TPU offers the TPUs the account may use.
+func TestHardwareFollowsAccount(t *testing.T) {
+	i18n.SetLang("en")
+	a := newTestApp(t)
+	tt := ui.NewTester(a.view, 1120, 1600)
+	if err := tt.Click("TPU"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.deploy.form.Accelerator != "V6E1" {
+		t.Errorf("accelerator %q for TPU", a.deploy.form.Accelerator)
+	}
+}
+
+func save(t *testing.T, tt *ui.Tester, path string) {
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	png.Encode(f, tt.Image())
+}
+
+// TestIcon draws the app's icon into resources/icon.png when
+// COLAUNCH_ICON is set: go test ./internal/app -run TestIcon.
+func TestIcon(t *testing.T) {
+	if os.Getenv("COLAUNCH_ICON") == "" {
+		t.Skip("set COLAUNCH_ICON to draw the icon")
+	}
+	view := func(c *ui.Context) {
+		th := *ui.LightTheme()
+		th.Background = ui.Transparent
+		c.SetTheme(&th)
+		ui.Column(c).Fill().Center().Children(func() {
+			ui.Column(c).Size(824, 824).Radius(185).Center().
+				Gradient(ui.Hex("#fbbf24"), ui.Hex("#e8710a"), 135).
+				Children(func() {
+					ui.Icon(c, iconRocket).Size(470, 470).TextColor(ui.Hex("#ffffff"))
+				})
+		})
+	}
+	tt := ui.NewTester(view, 1024, 1024)
+	tt.Frame()
+	// Clear what's outside the rounded square, which the window painted.
+	img := tt.Image()
+	const lo, hi, r = 100.0, 924.0, 185.0
+	for y := 0; y < 1024; y++ {
+		for x := 0; x < 1024; x++ {
+			px, py := float64(x)+0.5, float64(y)+0.5
+			cx := math.Max(lo+r, math.Min(hi-r, px))
+			cy := math.Max(lo+r, math.Min(hi-r, py))
+			d := math.Hypot(px-cx, py-cy) - r
+			if px < lo || px > hi || py < lo || py > hi {
+				d = math.Max(d, 1)
+			}
+			a := math.Max(0, math.Min(1, 0.5-d))
+			i := img.PixOffset(x, y)
+			for k := 0; k < 4; k++ {
+				img.Pix[i+k] = uint8(float64(img.Pix[i+k]) * a)
+			}
+		}
+	}
+	out, err := os.Create("../../resources/icon.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	png.Encode(out, img)
+}

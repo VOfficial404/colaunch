@@ -1,0 +1,5 @@
+# LF everywhere: agent.py and llama.sh are embedded in the app and run on
+# Linux runtimes, where a carriage return breaks them.
+* text=auto eol=lf
+*.png binary
+*.ico binary
