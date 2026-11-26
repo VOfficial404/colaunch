@@ -61,6 +61,7 @@ type App struct {
 	accounts accountsState
 	settings settingsState
 	risky    riskyState
+	domains  domainsState
 	tasks    tasksState
 	// details are the errors whose details are open, by notice.
 	details map[string]bool

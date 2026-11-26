@@ -218,6 +218,7 @@ func (a *App) settingsPage(c *ui.Context) {
 		a.riskySection(c)
 	})
 	a.riskyDialog(c)
+	a.domainsDialogs(c)
 }
 
 func autonyms() []string {

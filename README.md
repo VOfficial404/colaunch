@@ -66,7 +66,7 @@ For images and videos, select **Images and videos (ComfyUI)** on **Deploy** and 
 
 ## Risky features
 
-**Settings → Risky features** has three switches, all off by default: public links to a runtime's web pages and APIs through a Cloudflare quick tunnel, grabbing as often as every 3 seconds, and deploying web tasks such as ComfyUI on Colab's free tier. None of them gets around Colab's rules, but each makes it likelier that Colab ends a runtime or restricts the account, at your own risk. Turning one on asks first. [What each does and how to turn it off](docs/risky.md)
+**Settings → Risky features** has three switches, all off by default: public links to a runtime's web pages and APIs through a Cloudflare quick tunnel, grabbing as often as every 3 seconds, and deploying web tasks such as ComfyUI on Colab's free tier. None of them gets around Colab's rules, but each makes it likelier that Colab ends a runtime or restricts the account, at your own risk. Turning one on asks first. Public links can also go to a domain of your own through a Cloudflare Tunnel, optionally behind Cloudflare Access. [What each does and how to turn it off](docs/risky.md)
 
 ## Background operation
 

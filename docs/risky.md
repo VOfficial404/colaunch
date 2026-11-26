@@ -22,6 +22,35 @@ Turning a switch on shows what it risks and asks you to confirm with **I underst
 
 **Close it:** click **Close public link**. Links also close when the runtime stops or is given back, and when you turn the setting off. They aren't kept across restarts: when Colaunch reconnects to a runtime after it restarts, it closes any tunnels still running there. Make a new link if you need one.
 
+## Your own domain
+
+With **Public links** on, a runtime's port can also be published at an address of your own, as `https://ai.example.com`, through a named [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). The domain must be on Cloudflare. Set it up under **Settings → Risky features → Your own domain (Cloudflare)**, then use **Publish to my domain** on the runtime's card. One configuration serves one port at a time.
+
+There are two ways to set it up:
+
+**Tunnel token** — you set up the tunnel yourself:
+
+1. In [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**, create a tunnel of type **Cloudflared**.
+2. Add a **Public hostname**, as `ai.example.com`, pointing to `http://localhost:<port>`, where the port is the runtime's: `8765` for a model deployed with llama.cpp, `8188` for ComfyUI. The card says which when you publish.
+3. Copy the tunnel's token (the long string after `--token` in the install command) into Colaunch with the hostname.
+
+**API** — Colaunch sets it up:
+
+1. Create an [API token](https://dash.cloudflare.com/profile/api-tokens) with these permissions:
+   - Account · Cloudflare Tunnel · Edit
+   - Zone · DNS · Edit
+   - Zone · Zone · Read (to list your domains)
+   - Account · Access: Apps and Policies · Edit (only to protect it with Access)
+2. Paste it into Colaunch, press **Verify token**, pick the account and the domain, and type a subdomain.
+3. On publishing, Colaunch creates or reuses a tunnel named `colaunch-<id>`, points the subdomain at it with a proxied CNAME, and routes it to the runtime's port. It never overwrites a DNS record it didn't create: if the name is taken, it says so and stops.
+
+**Protect it with Cloudflare Access** (API mode): only people who sign in with the email addresses you list can open the address. ComfyUI and most web pages have no sign-in of their own, so without Access anyone who finds the address can use your GPU. Access sits in front of APIs too: OpenAI clients can't sign in through a browser, so for an API you'd rather rely on its API key.
+
+- Tokens are kept in the system's keychain. On the runtime, the tunnel token goes in a file only Colaunch reads, which cloudflared reads it from; it's never on a command line, and the file is deleted when the link closes.
+- llama.cpp's API still needs an API key before it can be published.
+- **Disconnect** stops the tunnel on the runtime; it also stops when the runtime does. The tunnel and the DNS record stay on Cloudflare, so the same address works the next time. **Delete on Cloudflare** in the configuration removes the tunnel, its DNS record and its Access app.
+- Everything said above about public links applies: Colab may end the runtime or restrict the account, and the traffic doesn't count as activity for the idle timeout.
+
 ## Aggressive grabbing
 
 **Aggressive grabbing** lowers the shortest wait between rounds of grabbing from 10 seconds to 3. Without it, any shorter wait is raised to 10 seconds. With an interval under 10 seconds, the grab form shows **Requests this frequent may be rate-limited or flagged**: Colab may limit or flag an account that asks for runtimes every few seconds.

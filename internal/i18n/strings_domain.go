@@ -1,0 +1,137 @@
+package i18n
+
+// The strings of publishing on the user's own domain through Cloudflare,
+// under public links in the risky features.
+func init() {
+	for k, v := range domainDict {
+		dict[k] = v
+	}
+}
+
+var domainDict = map[string][3]string{
+	"domain.title": {"Your own domain (Cloudflare)", "自有域名（Cloudflare）", "自有網域（Cloudflare）"},
+	"domain.help": {
+		"Publish a runtime's web page or API on a hostname of yours, as https://ai.example.com, through a named Cloudflare Tunnel. Your domain must be on Cloudflare.",
+		"通过 Cloudflare 命名隧道，把运行时的网页或 API 发布到你自己的主机名（例如 https://ai.example.com）。域名需托管在 Cloudflare。",
+		"透過 Cloudflare 具名通道，把執行階段的網頁或 API 發布到你自己的主機名稱（例如 https://ai.example.com）。網域需託管在 Cloudflare。",
+	},
+	"domain.needs_public": {
+		"Turn on public links above to use your own domain.",
+		"先开启上方的「允许生成公网分享链接」才能使用自有域名。",
+		"先開啟上方的「允許產生公開分享連結」才能使用自有網域。",
+	},
+	"domain.none":       {"No domains yet.", "还没有域名配置。", "還沒有網域設定。"},
+	"domain.add":        {"Add a domain", "添加域名", "新增網域"},
+	"domain.docs":       {"How to set it up", "配置说明", "設定說明"},
+	"domain.new_title":  {"New domain", "新建域名配置", "新增網域設定"},
+	"domain.edit_title": {"Edit domain", "编辑域名配置", "編輯網域設定"},
+	"domain.name":       {"Name", "名称", "名稱"},
+	"domain.name_ph":    {"My domain", "我的域名", "我的網域"},
+	"domain.mode":       {"How Colaunch reaches Cloudflare", "连接 Cloudflare 的方式", "連線 Cloudflare 的方式"},
+	"domain.mode_token": {"Tunnel token", "隧道令牌", "通道權杖"},
+	"domain.mode_api":   {"API token", "API 令牌", "API 權杖"},
+	"domain.token_steps": {
+		"In Cloudflare Zero Trust → Networks → Tunnels, create a Cloudflared tunnel and add a public hostname whose service is HTTP to localhost and the runtime's port, as http://localhost:8188 for ComfyUI. Paste the tunnel's token (the long string after --token in its install command) here.",
+		"在 Cloudflare Zero Trust → 网络 → 隧道中创建 Cloudflared 隧道，添加一个公共主机名，服务类型为 HTTP、地址为 localhost 加运行时端口，例如 ComfyUI 填 http://localhost:8188。把隧道令牌（安装命令里 --token 后面那一长串）粘贴到这里。",
+		"在 Cloudflare Zero Trust → 網路 → 通道中建立 Cloudflared 通道，新增一個公用主機名稱，服務類型為 HTTP、位址為 localhost 加執行階段連接埠，例如 ComfyUI 填 http://localhost:8188。把通道權杖（安裝指令中 --token 後面那一長串）貼到這裡。",
+	},
+	"domain.hostname":     {"Hostname", "主机名", "主機名稱"},
+	"domain.tunnel_token": {"Tunnel token", "隧道令牌", "通道權杖"},
+	"domain.api_token":    {"Cloudflare API token", "Cloudflare API 令牌", "Cloudflare API 權杖"},
+	"domain.api_perms": {
+		"Create a token at dash.cloudflare.com → My Profile → API Tokens with: Account · Cloudflare Tunnel · Edit; Zone · DNS · Edit; Zone · Zone · Read, to list your domains; and, for Cloudflare Access, Account · Access: Apps and Policies · Edit.",
+		"在 dash.cloudflare.com → 我的个人资料 → API 令牌 创建令牌，权限：帐户 · Cloudflare Tunnel · 编辑；区域 · DNS · 编辑；区域 · 区域 · 读取（用于列出域名）；如需 Cloudflare Access，再加 帐户 · Access：应用和策略 · 编辑。",
+		"在 dash.cloudflare.com → 我的設定檔 → API 權杖 建立權杖，權限：帳戶 · Cloudflare Tunnel · 編輯；區域 · DNS · 編輯；區域 · 區域 · 讀取（用於列出網域）；如需 Cloudflare Access，再加 帳戶 · Access：應用程式和原則 · 編輯。",
+	},
+	"domain.verify":        {"Verify token", "验证令牌", "驗證權杖"},
+	"domain.verifying":     {"Verifying…", "正在验证…", "正在驗證…"},
+	"domain.verified":      {"The token works: %d account(s).", "令牌可用：%d 个帐户。", "權杖可用：%d 個帳戶。"},
+	"domain.account":       {"Account", "帐户", "帳戶"},
+	"domain.zone":          {"Domain", "域名", "網域"},
+	"domain.loading_zones": {"Loading domains…", "正在加载域名…", "正在載入網域…"},
+	"domain.no_zones": {
+		"The token sees no domain in this account. Give it Zone · Zone · Read for your domain.",
+		"令牌在该帐户下看不到任何域名，请为它授予对应域名的 区域 · 区域 · 读取 权限。",
+		"權杖在此帳戶下看不到任何網域，請為它授予對應網域的 區域 · 區域 · 讀取 權限。",
+	},
+	"domain.subdomain": {"Subdomain", "子域名", "子網域"},
+	"domain.preview":   {"Address: %s", "地址：%s", "位址：%s"},
+	"domain.access": {
+		"Protect with Cloudflare Access (only these emails can sign in)",
+		"用 Cloudflare Access 保护（仅限以下邮箱登录）",
+		"用 Cloudflare Access 保護（僅限以下電子郵件登入）",
+	},
+	"domain.emails":    {"Emails", "邮箱", "電子郵件"},
+	"domain.emails_ph": {"you@example.com, friend@example.com", "you@example.com, friend@example.com", "you@example.com, friend@example.com"},
+	"domain.access_help": {
+		"Recommended. Visitors sign in with a one-time code sent to their email before they reach the port. The account needs Cloudflare Zero Trust set up; its free plan is enough. An API used by programs can't sign in this way.",
+		"推荐开启。访问者需先用发送到邮箱的一次性验证码登录，才能访问端口。帐户需已开通 Cloudflare Zero Trust（免费套餐即可）。供程序调用的 API 无法这样登录。",
+		"建議開啟。訪客需先用寄到電子郵件的一次性驗證碼登入，才能存取連接埠。帳戶需已啟用 Cloudflare Zero Trust（免費方案即可）。供程式呼叫的 API 無法這樣登入。",
+	},
+	"domain.secret_help": {
+		"Tokens are kept in the system's keychain, not in settings.json.",
+		"令牌保存在系统钥匙串中，不会写入 settings.json。",
+		"權杖儲存在系統鑰匙圈中，不會寫入 settings.json。",
+	},
+	"domain.issue_name":      {"Give it a name.", "请填写名称。", "請填寫名稱。"},
+	"domain.issue_host":      {"Enter the hostname you set in Cloudflare, as ai.example.com.", "请填写你在 Cloudflare 中设置的主机名，例如 ai.example.com。", "請填寫你在 Cloudflare 中設定的主機名稱，例如 ai.example.com。"},
+	"domain.issue_token":     {"Paste the tunnel token.", "请粘贴隧道令牌。", "請貼上通道權杖。"},
+	"domain.issue_api_token": {"Paste the API token, then verify it.", "请粘贴 API 令牌并验证。", "請貼上 API 權杖並驗證。"},
+	"domain.issue_zone":      {"Verify the token, then choose an account and a domain.", "请先验证令牌，再选择帐户和域名。", "請先驗證權杖，再選擇帳戶和網域。"},
+	"domain.issue_subdomain": {"Enter a subdomain of letters, digits and hyphens, as ai.", "请填写由字母、数字和连字符组成的子域名，例如 ai。", "請填寫由字母、數字和連字號組成的子網域，例如 ai。"},
+	"domain.issue_emails":    {"Add at least one email for Cloudflare Access.", "Cloudflare Access 至少需要一个邮箱。", "Cloudflare Access 至少需要一個電子郵件。"},
+	"domain.save":            {"Save domain", "保存域名配置", "儲存網域設定"},
+	"domain.edit":            {"Edit", "编辑", "編輯"},
+	"domain.delete":          {"Delete", "删除", "刪除"},
+	"domain.delete_title":    {"Delete this domain?", "删除此域名配置？", "刪除此網域設定？"},
+	"domain.delete_text": {
+		"Delete %s from Colaunch? A runtime using it is disconnected. What it made on Cloudflare stays: delete that first if you no longer want it.",
+		"从 Colaunch 删除「%s」？正在使用它的运行时会断开。它在 Cloudflare 上创建的内容会保留，如不再需要请先删除。",
+		"從 Colaunch 刪除「%s」？正在使用它的執行階段會中斷連線。它在 Cloudflare 上建立的內容會保留，如不再需要請先刪除。",
+	},
+	"domain.remove":       {"Delete the tunnel and DNS record on Cloudflare", "删除 Cloudflare 上的隧道和 DNS 记录", "刪除 Cloudflare 上的通道和 DNS 記錄"},
+	"domain.remove_title": {"Delete on Cloudflare?", "删除 Cloudflare 上的内容？", "刪除 Cloudflare 上的內容？"},
+	"domain.remove_text": {
+		"Colaunch deletes the tunnel it made, the DNS record of %s and its Access application. Records Colaunch didn't make stay. Publishing again makes them anew.",
+		"Colaunch 将删除它创建的隧道、%s 的 DNS 记录及其 Access 应用。不是 Colaunch 创建的记录会保留。再次发布时会重新创建。",
+		"Colaunch 將刪除它建立的通道、%s 的 DNS 記錄及其 Access 應用程式。不是 Colaunch 建立的記錄會保留。再次發布時會重新建立。",
+	},
+	"domain.remove_confirm": {"Delete on Cloudflare", "确认删除", "確認刪除"},
+	"domain.removing":       {"Deleting on Cloudflare…", "正在删除…", "正在刪除…"},
+	"domain.removed":        {"Deleted on Cloudflare", "已在 Cloudflare 上删除", "已在 Cloudflare 上刪除"},
+	"domain.in_use":         {"In use", "使用中", "使用中"},
+	"domain.access_on":      {"Cloudflare Access", "Cloudflare Access", "Cloudflare Access"},
+
+	"domain.publish":     {"Publish to my domain", "发布到我的域名", "發布到我的網域"},
+	"domain.choose":      {"Domain", "域名配置", "網域設定"},
+	"domain.target":      {"In Cloudflare, %s must point to %s.", "请确认 Cloudflare 中 %s 已指向 %s。", "請確認 Cloudflare 中 %s 已指向 %s。"},
+	"domain.target_done": {"%s points to %s in Cloudflare", "Cloudflare 中 %s 已指向 %s", "Cloudflare 中 %s 已指向 %s"},
+	"domain.publish_go":  {"Publish", "发布", "發布"},
+	"domain.moves": {
+		"%s serves %s now: publishing here disconnects it there.",
+		"%s 目前正用于 %s：在此发布会先断开那边。",
+		"%s 目前正用於 %s：在此發布會先中斷那邊。",
+	},
+	"domain.gpu_warning": {
+		"Without Cloudflare Access, anyone who finds this address can use your GPU through it.",
+		"未启用 Cloudflare Access：任何知道此地址的人都能用它使用你的 GPU。",
+		"未啟用 Cloudflare Access：任何知道此位址的人都能透過它使用你的 GPU。",
+	},
+	"domain.starting":      {"Publishing on %s…", "正在发布到 %s…", "正在發布到 %s…"},
+	"domain.link":          {"Your domain", "我的域名", "我的網域"},
+	"domain.protected":     {"Protected by Cloudflare Access", "受 Cloudflare Access 保护", "受 Cloudflare Access 保護"},
+	"domain.disconnect":    {"Disconnect", "断开", "中斷連線"},
+	"domain.confirm_title": {"Publish %s on %s?", "将 %s 发布到 %s？", "將 %s 發布到 %s？"},
+	"domain.confirm_text": {
+		"The port will be reachable from anywhere on the internet at this hostname. The traffic takes extra bandwidth, and Colab's FAQ disallows web services not related to interactive compute: Colab may end the runtime or restrict the account. Disconnecting keeps the tunnel and DNS record on Cloudflare for next time.",
+		"该端口将可通过此主机名从互联网任何地方访问。流量会额外占用带宽，且 Colab 常见问题禁止「与交互式计算无关的网络服务」：Colab 可能终止运行时或限制账号。断开后隧道和 DNS 记录会保留在 Cloudflare，方便下次使用。",
+		"該連接埠將可透過此主機名稱從網際網路任何地方存取。流量會額外占用頻寬，且 Colab 常見問題禁止「與互動式運算無關的網路服務」：Colab 可能終止執行階段或限制帳號。中斷連線後通道和 DNS 記錄會保留在 Cloudflare，方便下次使用。",
+	},
+	"domain.confirm": {"Publish it", "确认发布", "確認發布"},
+
+	"domain.err_token":      {"Cloudflare doesn't accept the token", "Cloudflare 不接受该令牌", "Cloudflare 不接受該權杖"},
+	"domain.err_permission": {"The API token lacks a permission", "API 令牌缺少权限", "API 權杖缺少權限"},
+	"domain.err_not_found":  {"The domain isn't in this account", "该域名不在此帐户中", "該網域不在此帳戶中"},
+	"domain.err_conflict":   {"The hostname is already in use on Cloudflare", "该主机名在 Cloudflare 上已被占用", "該主機名稱在 Cloudflare 上已被使用"},
+	"domain.err_other":      {"Cloudflare refused", "Cloudflare 操作失败", "Cloudflare 操作失敗"},
+}

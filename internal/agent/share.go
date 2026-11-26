@@ -20,6 +20,12 @@ import (
 //go:embed share.sh
 var shareScript string
 
+// cloudflaredScript has the functions that fetch cloudflared, checked
+// against its sha256, which share.sh and domain.sh call.
+//
+//go:embed cloudflared.sh
+var cloudflaredScript string
+
 // SharePrefix starts the IDs of the plugins that run public links.
 const SharePrefix = "share-"
 
@@ -38,8 +44,11 @@ var (
 // ShareScript is the script that runs the public link to port, which
 // marks its lines in the log with mark.
 func ShareScript(port int, mark string) string {
-	return fmt.Sprintf("S_PORT=%d\nS_MARK=%s\n", port, shellQuote(mark)) + strings.ReplaceAll(shareScript, "\r\n", "\n")
+	return fmt.Sprintf("S_PORT=%d\nS_MARK=%s\n", port, shellQuote(mark)) + unix(cloudflaredScript) + unix(shareScript)
 }
+
+// unix gives a script Unix line ends, as bash wants.
+func unix(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
 
 var (
 	quickURL = regexp.MustCompile(`https://([a-z0-9-]+)\.trycloudflare\.com\b`)

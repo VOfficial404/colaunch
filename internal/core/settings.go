@@ -70,6 +70,10 @@ type Risky struct {
 	// FreeWebUI lets an account on the free tier deploy tasks used
 	// through a web page, as ComfyUI.
 	FreeWebUI bool `json:"free_web_ui"`
+	// Domains are the user's own hostnames ports can be published on,
+	// through named Cloudflare Tunnels, while PublicLinks is on; their
+	// tokens are in Secrets.
+	Domains []DomainConfig `json:"domains,omitempty"`
 }
 
 // The least wait between rounds of grabbing, in seconds: normally, and
@@ -325,6 +329,7 @@ func (m *Manager) settingsToSave() Settings {
 		}
 	}
 	out.Notifications.Channels = m.channelsToSave()
+	out.Risky.Domains = m.domainsToSave()
 	return out
 }
 
@@ -351,6 +356,9 @@ func (m *Manager) loadSettingSecrets() (plain bool) {
 		}
 	}
 	if m.loadChannelSecrets() {
+		plain = true
+	}
+	if m.loadDomainSecrets() {
 		plain = true
 	}
 	return plain

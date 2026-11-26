@@ -61,6 +61,9 @@ type Session struct {
 	// Public are the ports reachable from the internet, by remote port;
 	// never saved.
 	Public map[int]*PublicLink
+	// Domains are the ports served on the user's own hostnames, by remote
+	// port; never saved.
+	Domains map[int]*DomainLink
 
 	// sentWD is the watchdog the runtime was last given, nil for none
 	// known; main thread.
@@ -645,10 +648,12 @@ func (m *Manager) Stop(s *Session, reason string) {
 	id := s.rid
 	s.mu.Unlock()
 	shares := s.dropPublicLinks()
+	domains := s.dropDomainLinks()
 	go func() {
 		// Should giving the runtime back fail, no tunnel stays open
 		// that the view no longer shows.
 		s.closeShares(shares)
+		s.closeDomains(domains)
 		s.closeConns()
 		var err error
 		if id != "" && a != nil {
@@ -918,6 +923,7 @@ func (m *Manager) gone(s *Session) {
 		s.StoppedAt = time.Now()
 		s.StopReason = "gone"
 		s.dropPublicLinks()
+		s.dropDomainLinks()
 		byRuntime := false
 		if st := s.Status; st != nil && st.Stopped != nil {
 			s.StopReason = st.Stopped.Reason
@@ -954,8 +960,8 @@ func (m *Manager) reattach(s *Session, a *Account) {
 		m.Post(func() { s.Phase = PhaseRunning; s.Err = errText(err) })
 		return
 	}
-	// Public links aren't kept: close those the app had before it
-	// restarted, which it no longer shows.
+	// Public links and domains aren't kept: close those the app had
+	// before it restarted, which it no longer shows.
 	for _, id := range leftShares(st) {
 		if err := agent.StopPlugin(ctx, sh, id); err == nil {
 			m.logf(s, "Closed a public link left from before the restart (%s).", id)

@@ -197,6 +197,7 @@ func (a *App) runtimesPage(c *ui.Context) {
 		}
 	}
 	a.shareDialog(c)
+	a.domainDialog(c)
 	if r.confirmRel && r.release != nil {
 		switch dangerConfirm(c, &r.confirmRel, i18n.T("stop.run_title"), i18n.F("stop.run_text", r.release.Runtime.Spec.String()), i18n.T("cancel"), i18n.T("stop.run_confirm")) {
 		case 1:
@@ -302,14 +303,14 @@ func (a *App) sessionCard(c *ui.Context, s *core.Session) {
 	})
 	if waiting {
 		el.Border(1, waitColor(t))
-	} else if s.HasPublicLink() {
+	} else if s.Exposed() {
 		el.Border(1, t.Danger)
 	}
 }
 
 // publicBadge marks a session with a port public on the internet.
 func publicBadge(c *ui.Context, s *core.Session) {
-	if !s.HasPublicLink() {
+	if !s.Exposed() {
 		return
 	}
 	t := c.Theme()
@@ -431,7 +432,7 @@ func (a *App) endpoints(c *ui.Context, s *core.Session) {
 						openURL(f.URL())
 					}
 				})
-				ui.Column(c.Key(f)).Children(func() { a.publicLink(c, s, f) })
+				ui.Column(c.Key(f)).Gap(6).Children(func() { a.publicLink(c, s, f); a.domainLink(c, s, f) })
 			case plugins.PortWeb, plugins.PortComfy:
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					a.copyable(c, f.Port.Name, f.URL())
@@ -439,7 +440,7 @@ func (a *App) endpoints(c *ui.Context, s *core.Session) {
 				if labeledButton(c, iconExternal, i18n.T("open"), false).Clicked() {
 					openURL(f.URL())
 				}
-				ui.Column(c.Key(f)).Children(func() { a.publicLink(c, s, f) })
+				ui.Column(c.Key(f)).Gap(6).Children(func() { a.publicLink(c, s, f); a.domainLink(c, s, f) })
 			default:
 				a.copyable(c, f.Port.Name, f.Address())
 			}

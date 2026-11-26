@@ -220,14 +220,16 @@ func (m *Manager) StopPublicLink(s *Session, remote int) {
 	}()
 }
 
-// StopAllPublicLinks closes every session's public links, as when the
-// setting is turned off. Call it from the main thread.
+// StopAllPublicLinks closes every session's public links, and disconnects
+// their domains, as when the setting is turned off. Call it from the main
+// thread.
 func (m *Manager) StopAllPublicLinks() {
 	for _, s := range m.Sessions {
 		for _, remote := range publicPorts(s) {
 			m.StopPublicLink(s, remote)
 		}
 	}
+	m.StopAllDomainLinks()
 }
 
 // publicPorts are the ports of the session that have a public link.
@@ -280,7 +282,7 @@ func leftShares(st *agent.Status) []string {
 	}
 	var ids []string
 	for id, p := range st.Plugins {
-		if strings.HasPrefix(id, agent.SharePrefix) && p.Running {
+		if (strings.HasPrefix(id, agent.SharePrefix) || strings.HasPrefix(id, agent.DomainPrefix)) && p.Running {
 			ids = append(ids, id)
 		}
 	}

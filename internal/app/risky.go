@@ -77,6 +77,9 @@ func (a *App) riskySection(c *ui.Context) {
 				}
 				ui.Text(c, f.help).FontSize(12).TextColor(t.TextMuted)
 			})
+			if f.on == &a.m.Settings.Risky.PublicLinks {
+				a.domainsSection(c)
+			}
 		}
 		ui.Row(c).Gap(8).Wrap().Children(func() {
 			if labeledButton(c, iconExternal, i18n.T("risky.faq"), false).Clicked() {

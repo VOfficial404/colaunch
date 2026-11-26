@@ -2,6 +2,12 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.7]
+
+- Publish a runtime's port at a domain of your own through a named Cloudflare Tunnel, under the **Public links** risky feature. Paste a tunnel token you set up in Cloudflare Zero Trust, or give an API token and let Colaunch create the tunnel and the DNS record, reusing them the next time. It never overwrites a DNS record it didn't create.
+- In API mode, the address can be protected with Cloudflare Access, so only the email addresses you list can open it.
+- Cloudflare tokens stay in the system's keychain; the tunnel token reaches cloudflared through a private file on the runtime, never its command line. [docs/risky.md](docs/risky.md#your-own-domain)
+
 ## [0.1.6]
 
 Risky features, under **Settings → Risky features**, all off by default. Each asks before it turns on, and says what it risks: Colab may end runtimes or restrict the account. [docs/risky.md](docs/risky.md)

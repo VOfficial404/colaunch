@@ -52,6 +52,14 @@ func newTestApp(t *testing.T) *App {
 	run.Forwards = []*core.ForwardState{{Port: plugins.Port{Name: "llama-server", Remote: plugins.LlamaPort, Local: 8080, Kind: plugins.PortOpenAI, Path: "/"}}}
 	run.Public = map[int]*core.PublicLink{plugins.LlamaPort: {Remote: plugins.LlamaPort, URL: "https://seasonal-deck-organisms-sf.trycloudflare.com"}}
 	m.Settings.Risky.PublicLinks = true
+	// Two of the user's own domains, the second, behind Cloudflare
+	// Access, serving the API too.
+	m.Settings.Risky.Domains = []core.DomainConfig{
+		{ID: "home", Name: "Home lab", Mode: core.DomainToken, Hostname: "ai.example.com", TunnelToken: "test-tunnel"},
+		{ID: "studio", Name: "Studio", Mode: core.DomainAPI, APIToken: "test-api", AccountID: "acc1", AccountName: "Ada's account",
+			ZoneID: "zone1", ZoneName: "example.com", Subdomain: "gpu", Access: true, AccessEmails: []string{"ada@example.com"}},
+	}
+	run.Domains = map[int]*core.DomainLink{plugins.LlamaPort: {Config: "studio", Remote: plugins.LlamaPort, Hostname: "gpu.example.com", URL: "https://gpu.example.com", Protected: true}}
 	st := &agent.Status{CPUs: 12}
 	st.GPUs = append(st.GPUs, struct {
 		Name        string `json:"name"`
@@ -159,6 +167,25 @@ func TestPagesBuild(t *testing.T) {
 						save(t, tt, filepath.Join(shots, fmt.Sprintf("create-%s-%s-%s-%s.png", v.name, size.name, theme, lang)))
 					}
 				}
+				// Settings' domains and the runtime card's domain picker,
+				// in a window tall enough to show them whole.
+				tt.SetSize(size.w, 5200)
+				for _, v := range domainViews(t, a) {
+					v.setup()
+					tt.Frame()
+					for _, s := range tt.Texts() {
+						if i18n.Has(s) {
+							t.Errorf("%s %s domain %s shows the key %q", lang, size.name, v.name, s)
+						}
+					}
+					if !tt.HasText(v.want()) {
+						t.Errorf("%s %s domain %s doesn't show %q", lang, size.name, v.name, v.want())
+					}
+					if shots != "" && lang != "zh-Hant" && !dark {
+						save(t, tt, filepath.Join(shots, fmt.Sprintf("domain-%s-%s-%s.png", v.name, size.name, lang)))
+					}
+				}
+				tt.SetSize(size.w, size.h)
 			}
 		}
 	}
