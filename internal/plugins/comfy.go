@@ -342,8 +342,7 @@ func (c Comfy) Deploy(ctx context.Context, env *Env) (*Result, error) {
 	if err := runScript(ctx, env, c.ID(), b.String()); err != nil {
 		return nil, err
 	}
-	check := fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/system_stats", ComfyPort)
-	if err := waitReady(ctx, env, c.ID(), 90*time.Minute, check); err != nil {
+	if err := waitReady(ctx, env, c.ID(), 90*time.Minute, c.readyCheck(ComfyPort)); err != nil {
 		return nil, err
 	}
 	env.Phase("ready")
@@ -365,6 +364,10 @@ func (c Comfy) Deploy(ctx context.Context, env *Env) (*Result, error) {
 		Model: alias,
 		Info:  info,
 	}, nil
+}
+
+func (Comfy) readyCheck(port int) string {
+	return fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/system_stats", port)
 }
 
 func (c Comfy) Stop(ctx context.Context, sh *colab.Shell) error {

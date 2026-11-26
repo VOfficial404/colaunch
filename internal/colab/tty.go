@@ -48,7 +48,7 @@ func DialTTY(ctx context.Context, conn *Connection) (*TTY, error) {
 	t := &TTY{ws: ws, r: pr, done: make(chan struct{})}
 	go t.readLoop(pw)
 	go t.pingLoop()
-	t.Resize(200, 50)
+	t.resize(ctx, 200, 50)
 	return t, nil
 }
 
@@ -124,10 +124,14 @@ func (t *TTY) writeString(ctx context.Context, s string) error {
 
 // Resize sets the terminal's size.
 func (t *TTY) Resize(cols, rows int) {
+	t.resize(context.Background(), cols, rows)
+}
+
+func (t *TTY) resize(ctx context.Context, cols, rows int) {
 	b, _ := json.Marshal(map[string]int{"cols": cols, "rows": rows})
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	t.ws.Write(ctx, websocket.MessageText, b)
 }
@@ -178,12 +182,17 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 	}
 	s := newShell(tty)
 	go s.pump()
-	if err := tty.WriteString(prelude); err != nil {
+	if err := tty.writeString(ctx, prelude); err != nil {
 		tty.Close()
 		return nil, err
 	}
-	time.Sleep(300 * time.Millisecond)
-	if err := tty.WriteString("stty -echo -onlcr 2>/dev/null; PS1=; PS2=; unset PROMPT_COMMAND\n"); err != nil {
+	select {
+	case <-ctx.Done():
+		tty.Close()
+		return nil, ctx.Err()
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tty.writeString(ctx, "stty -echo -onlcr 2>/dev/null; PS1=; PS2=; unset PROMPT_COMMAND\n"); err != nil {
 		tty.Close()
 		return nil, err
 	}
@@ -306,13 +315,31 @@ func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int
 // but its output had no complete START marker.
 var ErrMissingStart = errors.New("colab: missing command start marker")
 
-type missingStartError int
-
-func (n missingStartError) Error() string {
-	return fmt.Sprintf("colab: the output of command %d has no start", n)
+type missingStartError struct {
+	n      int
+	before string
+	status int
 }
 
-func (missingStartError) Unwrap() error { return ErrMissingStart }
+func (e *missingStartError) Error() string {
+	return fmt.Sprintf("colab: the output of command %d has no start", e.n)
+}
+
+func (*missingStartError) Unwrap() error { return ErrMissingStart }
+
+// MissingStartOutput returns, for an error of Run with ErrMissingStart,
+// everything the terminal printed after the previous command's end and
+// before this one's, and the exit status END reported. Unlike Run's
+// output, it may hold more than the command printed, or less: a caller
+// may use it only when it can tell, as by a token of its own that the
+// command prints, that what it holds is the command's output, whole.
+func MissingStartOutput(err error) (string, int, bool) {
+	var e *missingStartError
+	if !errors.As(err, &e) {
+		return "", -1, false
+	}
+	return e.before, e.status, true
+}
 
 // Run runs a bash command and returns what it printed, stdout and stderr
 // together, and its exit status.
@@ -345,7 +372,7 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
 	i := bytes.LastIndex(before, startMark)
 	if i < 0 {
-		return "", -1, missingStartError(n)
+		return "", -1, &missingStartError{n: n, before: string(before), status: code}
 	}
 	return string(before[i+len(startMark):]), code, nil
 }

@@ -7,6 +7,8 @@
 #   agent.py status            print the runtime's state as JSON
 #   agent.py run ID SCRIPT     run a plugin's script in the background
 #   agent.py running ID        print yes, no, or unknown for a plugin
+#   agent.py wait-log ID TOKEN OFFSET LIMIT
+#                              print liveness and one base64 log chunk
 #   agent.py stop ID           stop a plugin
 #   agent.py logs ID [LINES]   print the end of a plugin's log
 #   agent.py unassign REASON   give the runtime back to Colab now
@@ -435,6 +437,29 @@ def running(pid_name):
     return "yes" if owned else "no"
 
 
+def wait_log(pid_name, token, offset, limit):
+    # Check liveness before reading so a stopped plugin's final output is included.
+    try:
+        run = running(pid_name)
+    except (OSError, ValueError, OverflowError):
+        run = "unknown"
+    path = os.path.join(plugin_dir(pid_name), "log.txt")
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            if offset > size:
+                offset = 0
+            n = min(size - offset, limit)
+            if run == "no":
+                offset = size - n
+            f.seek(offset)
+            data = f.read(n)
+    except FileNotFoundError:
+        size, offset, data = 0, 0, b""
+    encoded = base64.b64encode(data).decode("ascii")
+    print("@@WAIT %s %d %d %s@@\n%s" % (token, size, offset, run, encoded))
+
+
 def stop(pid_name, quiet=False, forget=False):
     """Stops a plugin's processes, once sure its pid is still the plugin's.
     forget also removes what's left of its secrets."""
@@ -646,6 +671,8 @@ def main():
         run(sys.argv[2], sys.argv[3])
     elif cmd == "running":
         print(running(sys.argv[2]))
+    elif cmd == "wait-log":
+        wait_log(sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))
     elif cmd == "stop":
         stop(sys.argv[2], forget=True)
     elif cmd == "prepare":

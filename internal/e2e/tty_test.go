@@ -168,6 +168,72 @@ func TestShellRun(t *testing.T) {
 	}
 }
 
+// Replacing the control terminal must leave a running installer in place.
+func TestDetachedPluginSurvivesTerminalReconnect(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the runtime agent checks ownership using Linux /proc")
+	}
+	conn := fakeColab(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	first, err := colab.OpenShell(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	dir := t.TempDir()
+	agentPath := filepath.Join(dir, "agent.py")
+	if err := first.Upload(ctx, agentPath, agent.Script); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(dir, "install.sh")
+	if err := first.Upload(ctx, scriptPath, []byte(`echo started
+for ((i=0; i<150; i++)); do
+  if [ -f "$COLAUNCH_HOME/finish-install" ]; then
+    echo finished
+    exit 0
+  fi
+  sleep .1
+done
+exit 1
+`)); err != nil {
+		t.Fatal(err)
+	}
+	runAgent := fmt.Sprintf("COLAUNCH_HOME=%q python3 %q", dir, agentPath)
+	if out, code, err := first.Run(ctx, fmt.Sprintf("%s run install %q", runAgent, scriptPath)); err != nil || code != 0 {
+		t.Fatalf("start installer: status %d, %q, %v", code, out, err)
+	}
+	finishPath := filepath.Join(dir, "finish-install")
+	t.Cleanup(func() { _ = os.WriteFile(finishPath, nil, 0o600) })
+	first.Close()
+
+	second, err := colab.OpenShell(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if out, code, err := second.Run(ctx, runAgent+" running install"); err != nil || code != 0 || strings.TrimSpace(out) != "yes" {
+		t.Fatalf("after reconnect: status %d, %q, %v", code, out, err)
+	}
+	if err := os.WriteFile(finishPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for ctx.Err() == nil {
+		out, code, err := second.Run(ctx, runAgent+" logs install")
+		if err != nil || code != 0 {
+			t.Fatalf("read installer log: status %d, %q, %v", code, out, err)
+		}
+		if strings.TrimSpace(out) == "started\nfinished" {
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("installer did not finish after replacing the control terminal")
+}
+
 // Files go up byte for byte, binary ones too.
 func TestShellUpload(t *testing.T) {
 	conn := fakeColab(t)

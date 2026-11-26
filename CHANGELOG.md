@@ -2,6 +2,10 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.11]
+
+- Reopen the Colab control terminal if deployment status replies stay incomplete. Continue tracking the installer and reading its logs on the same runtime. A terminal reconnect does not restart the installation or request a new accelerator.
+
 ## [0.1.10]
 
 - Retry deployment status checks on the same runtime when Colab's terminal returns an incomplete command response, so a transient error no longer interrupts an installation. The app explains the terminal error if it persists.

@@ -258,8 +258,7 @@ func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
 	if err := runScript(ctx, env, l.ID(), b.String()); err != nil {
 		return nil, err
 	}
-	check := fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/health", LlamaPort)
-	if err := waitReady(ctx, env, l.ID(), 90*time.Minute, check); err != nil {
+	if err := waitReady(ctx, env, l.ID(), 90*time.Minute, l.readyCheck()); err != nil {
 		return nil, err
 	}
 	env.Phase("ready")
@@ -279,6 +278,10 @@ func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
 		APIKey: env.Values["api_key"],
 		Info:   info,
 	}, nil
+}
+
+func (Llama) readyCheck() string {
+	return fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/health", LlamaPort)
 }
 
 func (l Llama) Stop(ctx context.Context, sh *colab.Shell) error {

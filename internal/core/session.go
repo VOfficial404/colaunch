@@ -451,6 +451,9 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		Settings: settings,
 		Log:      func(f string, args ...any) { m.logf(s, f, args...) },
 		Phase:    func(p string) { m.Post(func() { s.PluginPhase = p }) },
+		Reconnect: func(ctx context.Context) (*colab.Shell, error) {
+			return m.reshell(ctx, s, a)
+		},
 	}
 	res, err := p.Deploy(ctx, env)
 	if err != nil {
@@ -484,7 +487,7 @@ func (m *Manager) connect(ctx context.Context, s *Session, conn *colab.Connectio
 	var err error
 	// A new runtime's proxy may take a moment to answer.
 	for i := 0; i < 6; i++ {
-		sh, err = colab.OpenShell(cctx, conn)
+		sh, err = openShell(cctx, conn)
 		if err == nil {
 			break
 		}
@@ -515,6 +518,61 @@ func (m *Manager) connect(ctx context.Context, s *Session, conn *colab.Connectio
 		old.Close()
 	}
 	return sh, st, nil
+}
+
+// openShell opens a terminal for commands; tests replace it.
+var openShell = colab.OpenShell
+
+// errReplaced means the session closed its connections, as stopping does,
+// while a new terminal was being opened.
+var errReplaced = errors.New("the session closed while a terminal was opened")
+
+const proxyRefreshBefore = 5 * time.Minute
+
+// reshell replaces the deployment's terminal on the same runtime. It
+// refreshes credentials when they are near expiry or the cached dial fails.
+func (m *Manager) reshell(ctx context.Context, s *Session, a *Account) (*colab.Shell, error) {
+	s.mu.Lock()
+	conn, id, gen := s.conn, s.rid, s.gen
+	s.mu.Unlock()
+	if id == "" {
+		return nil, errors.New("the session has no runtime")
+	}
+	var sh *colab.Shell
+	var cachedErr error
+	if conn != nil && time.Until(conn.ExpireTime) > proxyRefreshBefore {
+		// Leave time in the reconnect deadline to refresh and dial again.
+		dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		sh, cachedErr = openShell(dialCtx, conn)
+		cancel()
+	}
+	if sh == nil {
+		var err error
+		conn, err = runtimeConnection(ctx, a.Client, id)
+		if err != nil {
+			return nil, errors.Join(cachedErr, err)
+		}
+		if sh, err = openShell(ctx, conn); err != nil {
+			return nil, errors.Join(cachedErr, err)
+		}
+	}
+	s.mu.Lock()
+	if s.gen != gen || s.rid != id || ctx.Err() != nil {
+		s.mu.Unlock()
+		sh.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errReplaced
+	}
+	old := s.shell
+	s.shell, s.conn = sh, conn
+	s.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	m.logf(s, "Opened another terminal on runtime %s.", id)
+	return sh, nil
 }
 
 // watchdogFor computes the runtime's limits: the schedule, and the time
@@ -842,13 +900,24 @@ func (m *Manager) RemoveForward(s *Session, f *ForwardState) {
 	m.saveState()
 }
 
+func runtimeConnection(ctx context.Context, client *colab.Client, id string) (*colab.Connection, error) {
+	rt, err := client.Runtime(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rt.Connection == nil {
+		return nil, errors.New("the runtime has no connection")
+	}
+	return rt.Connection, nil
+}
+
 // shellOf returns the session's shell, opening one with a fresh connection
 // when it has none or its connection is about to expire.
 func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.Shell, error) {
 	s.mu.Lock()
 	sh, conn, id := s.shell, s.conn, s.rid
 	s.mu.Unlock()
-	if sh != nil && conn != nil && time.Until(conn.ExpireTime) > 5*time.Minute {
+	if sh != nil && conn != nil && time.Until(conn.ExpireTime) > proxyRefreshBefore {
 		select {
 		case <-sh.Done():
 		default:
@@ -858,12 +927,9 @@ func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.S
 	if id == "" {
 		return nil, errors.New("the session has no runtime")
 	}
-	rt, err := a.Client.Runtime(ctx, id)
+	conn, err := runtimeConnection(ctx, a.Client, id)
 	if err != nil {
 		return nil, err
-	}
-	if rt.Connection == nil {
-		return nil, errors.New("the runtime has no connection")
 	}
 	if sh != nil {
 		select {
@@ -871,12 +937,12 @@ func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.S
 		default:
 			// Still open: keep it, with the new token for what dials next.
 			s.mu.Lock()
-			s.conn = rt.Connection
+			s.conn = conn
 			s.mu.Unlock()
 			return sh, nil
 		}
 	}
-	sh, _, err = m.connect(ctx, s, rt.Connection)
+	sh, _, err = m.connect(ctx, s, conn)
 	return sh, err
 }
 
