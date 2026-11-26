@@ -27,7 +27,7 @@ var knownErrors = []knownError{
 	{key: "err.too_many", next: "err.too_many_next", match: []string{"too many runtimes", "too_many_active_runtimes"}},
 	{key: "err.quota", next: "err.quota_next", match: []string{"not enough compute units", "usage quota", "quota_exceeded"}},
 	{key: "err.unavailable", next: "err.unavailable_next", match: []string{"no such accelerator is available", "no accelerator is available"}},
-	{key: "err.terminal_output", next: "err.terminal_output_next", match: []string{"colab: the output of command "}},
+	{key: "err.terminal_output", next: "err.terminal_output_next", match: []string{"colab: the output of command ", "invalid readiness probe response", "the readiness probe didn't answer"}},
 	{key: "err.hf_not_found", next: "err.hf_not_found_next", match: []string{"hf: no such repository"}},
 	{key: "err.too_big", next: "err.too_big_next", match: []string{"no quantization of the model fits"}},
 	{key: "err.not_llm", next: "err.not_llm_next", match: []string{"llama.cpp can't serve"}},

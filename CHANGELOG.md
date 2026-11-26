@@ -2,6 +2,10 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.12]
+
+- Read deployment status and logs through a dedicated runtime monitor. Each response includes a random request identifier and a checksum. If a response is incomplete, Colaunch retries from the last confirmed log position. New terminals use unique handshake markers to ignore stale output. The installer keeps running on the same runtime while the monitor reconnects.
+
 ## [0.1.11]
 
 - Reopen the Colab control terminal if deployment status replies stay incomplete. Continue tracking the installer and reading its logs on the same runtime. A terminal reconnect does not restart the installation or request a new accelerator.

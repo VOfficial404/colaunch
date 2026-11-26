@@ -40,13 +40,23 @@ behind its token. Colaunch uses only the terminal:
 - **Commands** run in a bash without readline, whose terminal echoes
   nothing. Each prints markers around its output, typed with an empty pair
   of quotes inside (`@@S""TART-1@@`) so that the terminal echoing them, if
-  it does, doesn't print what is looked for.
+  it does, doesn't print what is looked for. A new terminal is ready once
+  it prints one marker of a random nonce of its own: what it printed
+  before, as an earlier terminal's output replayed, is dropped.
 - **Files** go up by switching the terminal to raw input, which has no
   limit on the length of lines, and having `head -c` read exactly the
   base64 sent.
 - **The tunnel** runs `agent.py mux` in a terminal of its own, raw: lines
   of `O id port`, `D id base64`, `C id` carry many TCP connections both
   ways.
+- **Waiting for a plugin** runs `agent.py wait-ready <id>` in a terminal of
+  its own, raw, as the tunnel does. Each request, `W nonce offset
+  base64(check)`, gets one line, `@@WR nonce crc32 payload@@`: `ready`, or
+  the plugin's liveness and a chunk of its log from offset. A line without
+  the request's nonce is ignored, one with a bad checksum or range is asked
+  again; a terminal that closes, doesn't answer or keeps answering badly is
+  replaced by another on the same runtime, reading on from the last offset
+  confirmed. The installer runs detached and doesn't notice.
 
 ## The watchdog
 

@@ -1,235 +1,342 @@
 package plugins
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"colaunch/internal/agent"
 	"colaunch/internal/colab"
 )
 
-const testProbeToken = "0123456789ab"
-
-const readyProbeOutput = "@@WAIT-READY " + testProbeToken + "@@\n"
-
-type probeReply struct {
-	command string
-	output  string
-	status  int
-	noStart bool
-	noEnd   bool
+// request is what the agent was asked on a terminal.
+type request struct {
+	conn  int
+	nonce string
+	off   int64
+	check string
 }
 
-// Use a real Shell and /colab/tty WebSocket, scripting the terminal's frames
-// so that dropping START is deterministic even without a runtime or a PTY.
-func probeShell(t *testing.T, replies ...probeReply) *colab.Shell {
+// reply is what a scripted terminal prints for a request: raw bytes, the
+// connection dropped, or nothing.
+type reply struct {
+	out  func(nonce string) string
+	drop bool
+}
+
+func answerLine(nonce, payload string) string {
+	return fmt.Sprintf("@@WR %s %08x %s@@\n", nonce, crc32.ChecksumIEEE([]byte(payload)), payload)
+}
+
+func readyReply() reply {
+	return reply{out: func(n string) string { return answerLine(n, "ready") }}
+}
+
+func logReply(size, from int, data, running string) reply {
+	return reply{out: func(n string) string {
+		return answerLine(n, fmt.Sprintf("log %d %d %s %s", size, from, running, base64.StdEncoding.EncodeToString([]byte(data))))
+	}}
+}
+
+// badReply is the observed "invalid readiness probe response": the
+// answer's line, its nonce right, cut short.
+func badReply(size, from int, data string) reply {
+	return reply{out: func(n string) string {
+		line := logReply(size, from, data, "yes").out(n)
+		return line[:len(line)/2] + "\n"
+	}}
+}
+
+// script is a terminal's part: what it printed before (a replay of an
+// earlier terminal's output), and its replies in order.
+type script struct {
+	stale   string
+	replies []reply
+}
+
+// monitorEnv serves /colab/tty as `agent.py wait-ready` on it would, one
+// script a connection, and returns an Env whose Stream dials it through
+// colab.Stream, as the app does, and the requests the terminals read.
+func monitorEnv(t *testing.T, id string, scripts ...script) (*Env, func() []request, *atomic.Int32) {
 	t.Helper()
-	old := newProbeToken
-	newProbeToken = func() string { return testProbeToken }
-	t.Cleanup(func() { newProbeToken = old })
-	replies = append([]probeReply{{command: "true"}}, replies...)
-	frame := regexp.MustCompile(`^echo @@S""TART-([0-9]+)@@; \(eval "\$\(echo ([A-Za-z0-9+/=]+) \| base64 -d\)`)
+	var mu sync.Mutex
+	var reqs []request
+	var conns atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
-			t.Error(err)
 			return
 		}
 		defer ws.CloseNow()
-		for n := 0; ; {
-			var msg struct{ Data string }
+		n := int(conns.Add(1))
+		if n > len(scripts) {
+			t.Errorf("terminal %d opened, %d expected", n, len(scripts))
+			return
+		}
+		sc := scripts[n-1]
+		write := func(s string) bool { return wsjson.Write(r.Context(), ws, map[string]string{"data": s}) == nil }
+		var in strings.Builder
+		started := false
+		for {
+			var msg struct{ Data *string }
 			if err := wsjson.Read(r.Context(), ws, &msg); err != nil {
 				return
 			}
-			if msg.Data == "" || strings.HasPrefix(msg.Data, "exec env ") || strings.HasPrefix(msg.Data, "stty -echo ") {
+			if msg.Data == nil {
 				continue
 			}
-			if strings.Contains(msg.Data, "stty raw") {
-				t.Errorf("command %d attempted a script upload", n)
-				return
+			if !started {
+				prefix := fmt.Sprintf("stty raw -echo; exec python3 -u %s wait-ready %s %d '", agent.Path, ShellQuote(id), waitLogChunk)
+				marker, found := strings.CutPrefix(*msg.Data, prefix)
+				if found {
+					started = true
+					marker = strings.TrimSuffix(marker, "'\n")
+					if !write(sc.stale + "\r\n@@COLAUNCH-WAIT-READY-STALE@@\r\n" + marker + "\r\n") {
+						return
+					}
+				}
+				continue
 			}
-			m := frame.FindStringSubmatch(msg.Data)
-			if n >= len(replies) || m == nil {
-				t.Errorf("unexpected command %q", msg.Data)
-				return
-			}
-			reply := replies[n]
-			n++
-			command, err := base64.StdEncoding.DecodeString(m[2])
-			if err != nil || string(command) != reply.command {
-				t.Errorf("command %d = %q, want %q (decode: %v)", n, command, reply.command, err)
-				return
-			}
-			start := fmt.Sprintf("@@START-%s@@\n", m[1])
-			if reply.noStart {
-				start = strings.TrimSuffix(start, "@\n")
-			}
-			end := fmt.Sprintf("@@END-%s:%d@@\n", m[1], reply.status)
-			if reply.noEnd {
-				end = ""
-			}
-			if err := wsjson.Write(r.Context(), ws, map[string]string{"data": start + reply.output + end}); err != nil {
-				return
+			in.WriteString(*msg.Data)
+			for {
+				s := in.String()
+				line, rest, ok := strings.Cut(s, "\n")
+				if !ok {
+					break
+				}
+				in.Reset()
+				in.WriteString(rest)
+				f := strings.Split(line, " ")
+				if len(f) != 4 || f[0] != "W" {
+					t.Errorf("bad request %q", line)
+					return
+				}
+				off, err := strconv.ParseInt(f[2], 10, 64)
+				check, err2 := base64.StdEncoding.DecodeString(f[3])
+				if err != nil || err2 != nil {
+					t.Errorf("bad request %q", line)
+					return
+				}
+				mu.Lock()
+				k := 0
+				for _, q := range reqs {
+					if q.conn == n {
+						k++
+					}
+				}
+				reqs = append(reqs, request{conn: n, nonce: f[1], off: off, check: string(check)})
+				mu.Unlock()
+				if k >= len(sc.replies) {
+					continue // silence
+				}
+				rp := sc.replies[k]
+				if rp.drop {
+					return
+				}
+				if rp.out != nil && !write(rp.out(f[1])) {
+					return
+				}
 			}
 		}
 	}))
 	t.Cleanup(srv.Close)
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	sh, err := colab.OpenShell(ctx, &colab.Connection{URL: srv.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { sh.Close() })
-	return sh
-}
-
-func probeLog(size, from int, data, running string) string {
-	return fmt.Sprintf("@@WAIT %s %d %d %s@@\n%s\n", testProbeToken, size, from, running, base64.StdEncoding.EncodeToString([]byte(data)))
-}
-
-func TestWaitReadyBuiltinProbesStayInline(t *testing.T) {
-	for _, tc := range []struct{ id, check string }{
-		{Comfy{}.ID(), Comfy{}.readyCheck(ComfyPort)},
-		{Llama{}.ID(), Llama{}.readyCheck()},
-	} {
-		t.Run(tc.id, func(t *testing.T) {
-			const off = 123_456_789
-			const data = "loading\n"
-			command := waitReadyProbe(tc.id, testProbeToken, off, tc.check)
-			encoded := base64.StdEncoding.EncodedLen(len(command))
-			t.Logf("offset %d: %d command bytes, %d base64 bytes", off, len(command), encoded)
-			if encoded > 700 {
-				t.Errorf("encoded command exceeds the 700-byte tty.Run limit")
+	env := &Env{
+		Log:   func(string, ...any) {},
+		Phase: func(string) {},
+		Stream: func(ctx context.Context, command, ready string) (StreamConn, *bufio.Reader, error) {
+			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > waitReconnectTimeout {
+				t.Errorf("stream deadline = %v", deadline)
 			}
-			sh := probeShell(t, probeReply{command: command, output: probeLog(off+len(data), off, data, "yes")})
-			a, _, err := runWaitProbe(t.Context(), sh, tc.id, off, tc.check)
-			if err != nil || a.from != off || string(a.data) != data || !a.running {
-				t.Fatalf("probe = %+v, error = %v", a, err)
+			tty, r, err := colab.Stream(ctx, &colab.Connection{URL: srv.URL}, command, ready)
+			if err != nil {
+				return nil, nil, err
 			}
-		})
+			return tty, r, nil
+		},
 	}
+	return env, func() []request {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]request(nil), reqs...)
+	}, &conns
 }
 
-func TestWaitReadyRecoversMissingStart(t *testing.T) {
-	id, check := Comfy{}.ID(), Comfy{}.readyCheck(ComfyPort)
+func offsets(reqs []request) string {
+	var b []string
+	for _, q := range reqs {
+		b = append(b, fmt.Sprintf("%d:%d", q.conn, q.off))
+	}
+	return strings.Join(b, " ")
+}
+
+// The two failures seen deploying ComfyUI: an answer that came back
+// broken, and a new terminal that printed an earlier one's output (an END
+// with no START, and an answer to another request) before its own. The
+// wait goes on, on a new terminal, from the last log offset confirmed,
+// showing every line once.
+func TestWaitReadyRecoversFromBrokenTerminals(t *testing.T) {
+	c := Comfy{}
+	id, check := c.ID(), c.readyCheck(ComfyPort)
 	const phase = "@@PHASE installing@@\n"
 	const progress = "10%\r"
-	first := phase + strings.Repeat("\n", waitLogChunk-len(phase)-len(progress)) + progress
-	second := "100%\n" + strings.Repeat("\n", waitLogChunk-len("100%\n"))
-	const size = 2*waitLogChunk + 1
-	probe := func(off int64) string { return waitReadyProbe(id, testProbeToken, off, check) }
-	sh := probeShell(t,
-		probeReply{command: probe(0), noStart: true},
-		probeReply{command: probe(0), noStart: true},
-		probeReply{command: probe(0), output: probeLog(size, 0, first, "yes")},
-		probeReply{command: probe(waitLogChunk), output: probeLog(size, waitLogChunk, second, "yes"), noStart: true},
-		probeReply{command: probe(2 * waitLogChunk), output: readyProbeOutput},
+	first := phase + "Keeping torch\n" + strings.Repeat("\n", waitLogChunk-len(phase)-len("Keeping torch\n")-len(progress)) + progress
+	second := "100%\nloading\n"
+	size := waitLogChunk + len(second)
+	env, reqs, conns := monitorEnv(t, id,
+		script{replies: []reply{
+			logReply(size, 0, first, "yes"),
+			badReply(size, waitLogChunk, second),
+			badReply(size, waitLogChunk, second),
+		}},
+		script{
+			stale: "@@END-1:0@@\n" + answerLine("0123456789ab", "ready") + "@@WR",
+			replies: []reply{
+				{out: func(n string) string {
+					return answerLine("0123456789ab", "ready") + logReply(size, waitLogChunk, second, "yes").out(n)
+				}},
+				{drop: true},
+			},
+		},
+		script{replies: []reply{
+			{out: func(n string) string {
+				return "garbage\n" + strings.TrimSuffix(logReply(size, size, "", "yes").out(n), "\n") + "\r\n"
+			}},
+			readyReply(),
+		}},
 	)
+	fastWait(t)
 	var phases, logs []string
-	env := &Env{Shell: sh, Phase: func(p string) { phases = append(phases, p) }, Log: func(f string, args ...any) {
-		logs = append(logs, fmt.Sprintf(f, args...))
-	}}
-	if err := waitReady(t.Context(), env, id, 5*time.Second, check); err != nil {
+	env.Phase = func(p string) { phases = append(phases, p) }
+	env.Log = func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	if err := waitReady(ctx, env, id, 90*time.Minute, check); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(phases, " ") != "installing" || strings.Join(logs, " ") != "100%" {
-		t.Fatalf("phases %q, logs %q", phases, logs)
+	var shown []string
+	for _, l := range logs {
+		if !strings.HasPrefix(l, "The terminal stopped answering") {
+			shown = append(shown, l)
+		}
 	}
-}
-
-func TestWaitReadyBoundsMissingStarts(t *testing.T) {
-	const id, check = "p", "false"
-	missing := probeReply{command: waitReadyProbe(id, testProbeToken, 0, check), noStart: true}
-	sh := probeShell(t, probeReply{command: "echo once", noStart: true}, missing, missing, missing)
-	if _, _, err := sh.Run(t.Context(), "echo once"); !errors.Is(err, colab.ErrMissingStart) || err.Error() != "colab: the output of command 2 has no start" {
-		t.Fatalf("Run error = %v", err)
+	if strings.Join(phases, " ") != "installing" || strings.Join(shown, "|") != "Keeping torch|100%|loading" {
+		t.Errorf("phases %q, logs %q", phases, logs)
 	}
-	if err := waitReady(t.Context(), &Env{Shell: sh}, id, 5*time.Second, check); !errors.Is(err, colab.ErrMissingStart) || err.Error() != "colab: the output of command 5 has no start" {
-		t.Fatalf("waitReady error = %v", err)
+	got := reqs()
+	want := fmt.Sprintf("1:0 1:%[1]d 1:%[1]d 2:%[1]d 2:%[2]d 3:%[2]d 3:%[2]d", waitLogChunk, size)
+	if offsets(got) != want {
+		t.Errorf("requests %s, want %s", offsets(got), want)
 	}
-}
-
-func TestWaitReadyRejectsFailedProbe(t *testing.T) {
-	const id, check = "p", "false"
-	probe := waitReadyProbe(id, testProbeToken, 0, check)
-	for _, noStart := range []bool{false, true} {
-		failed := probeReply{command: probe, output: readyProbeOutput, status: 1, noStart: noStart}
-		sh := probeShell(t, failed, failed, failed)
-		if err := waitReady(t.Context(), &Env{Shell: sh}, id, 5*time.Second, check); err == nil || !strings.Contains(err.Error(), "exited with status 1") {
-			t.Fatalf("waitReady error with noStart=%t: %v", noStart, err)
+	seen := map[string]bool{}
+	for _, q := range got {
+		if q.check != check || seen[q.nonce] {
+			t.Errorf("request %+v: check or nonce reused", q)
+		}
+		seen[q.nonce] = true
+	}
+	if conns.Load() != 3 {
+		t.Errorf("%d terminals", conns.Load())
+	}
+	for _, l := range logs {
+		for _, q := range got {
+			if strings.Contains(l, q.nonce) {
+				t.Errorf("log %q shows a nonce", l)
+			}
 		}
 	}
 }
 
-func TestWaitReadyReconnectsAfterMalformedReplies(t *testing.T) {
-	comfy := Comfy{}
-	id, check := comfy.ID(), comfy.readyCheck(ComfyPort)
-	probe := func(off int64) string { return waitReadyProbe(id, testProbeToken, off, check) }
-	first := strings.Repeat("\n", waitLogChunk-len("installing")) + "installing"
-	for _, tc := range []struct {
-		name string
-		bad  probeReply
-	}{
-		{"missing START", probeReply{command: probe(waitLogChunk), noStart: true}},
-		{"truncated log", probeReply{command: probe(waitLogChunk), output: probeLog(waitLogChunk+10, waitLogChunk, "truncated", "yes")}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			sh := probeShell(t, probeReply{command: probe(0), output: probeLog(waitLogChunk+3, 0, first, "yes")}, tc.bad, tc.bad)
-			next := probeShell(t, probeReply{command: probe(waitLogChunk), output: readyProbeOutput})
-			env := &Env{Shell: sh, Reconnect: func(ctx context.Context) (*colab.Shell, error) {
-				deadline, ok := ctx.Deadline()
-				if !ok || time.Until(deadline) > waitReconnectTimeout {
-					t.Errorf("reconnect deadline = %v", deadline)
-				}
-				sh.Close()
-				return next, nil
-			}}
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			if err := waitReady(ctx, env, id, 90*time.Minute, check); err != nil {
-				t.Fatal(err)
-			}
-			if env.Shell != next {
-				t.Fatal("waitReady kept the failed terminal")
-			}
-		})
-	}
+// fastWait makes requests time out, and the waits between polls and
+// terminals, short.
+func fastWait(t *testing.T) {
+	oldTimeout, oldPoll, oldReopen := waitProbeTimeout, waitPollInterval, waitReopenDelay
+	waitProbeTimeout, waitPollInterval, waitReopenDelay = 300*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { waitProbeTimeout, waitPollInterval, waitReopenDelay = oldTimeout, oldPoll, oldReopen })
 }
 
-func TestWaitReadyTimesOutWithoutEnd(t *testing.T) {
-	const id, check = "p", "false"
-	const timeout = 200 * time.Millisecond
-	missing := probeReply{command: waitReadyProbe(id, testProbeToken, 0, check), noStart: true}
-	sh := probeShell(t, missing, probeReply{command: missing.command, noStart: true, noEnd: true})
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := waitReady(ctx, &Env{Shell: sh}, id, timeout, check); err == nil || err.Error() != "the plugin didn't get ready in 200ms" {
-		t.Fatalf("waitReady error = %v", err)
-	}
-}
-
+// A plugin that stopped gives its log's end, from where it was read to.
 func TestWaitReadyKeepsStoppedTail(t *testing.T) {
 	const id, check = "p", "false"
 	const last = "\n20%\rfatal: dependency install failed"
 	tail := strings.Repeat("\n", waitLogChunk-len(last)) + last
-	probe := waitReadyProbe(id, testProbeToken, 0, check)
-	sh := probeShell(t,
-		probeReply{command: probe, output: probeLog(3*waitLogChunk, 0, strings.Repeat("\n", waitLogChunk), "no")},
-		probeReply{command: probe, output: probeLog(3*waitLogChunk, 2*waitLogChunk, tail, "no")},
-	)
-	env := &Env{Shell: sh, Log: func(string, ...any) {}}
+	env, _, _ := monitorEnv(t, id, script{replies: []reply{
+		logReply(3*waitLogChunk, 2*waitLogChunk, tail, "no"),
+	}})
 	if err := waitReady(t.Context(), env, id, 5*time.Second, check); err == nil || err.Error() != "the plugin stopped: fatal: dependency install failed" {
 		t.Fatalf("waitReady error = %v", err)
+	}
+}
+
+// Terminals that keep failing end the wait with an error, for the caller
+// to give the runtime back, after a bounded number of them.
+func TestWaitReadyGivesUp(t *testing.T) {
+	const id, check = "p", "false"
+	fastWait(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	bad := script{replies: []reply{badReply(1, 0, "x"), badReply(1, 0, "x")}}
+	var scripts []script
+	for range waitMaxFails {
+		scripts = append(scripts, bad)
+	}
+	env, reqs, conns := monitorEnv(t, id, scripts...)
+	if err := waitReady(ctx, env, id, 90*time.Minute, check); !errors.Is(err, errBadAnswer) || err.Error() != "invalid readiness probe response" {
+		t.Fatalf("waitReady error = %v", err)
+	}
+	if conns.Load() != waitMaxFails || len(reqs()) != waitMaxFails*waitMaxMisses {
+		t.Errorf("%d terminals, %d requests", conns.Load(), len(reqs()))
+	}
+
+	var dials int
+	env.Stream = func(context.Context, string, string) (StreamConn, *bufio.Reader, error) {
+		dials++
+		return nil, nil, errors.New("colab: terminal: 502")
+	}
+	if err := waitReady(ctx, env, id, 90*time.Minute, check); err == nil || !strings.Contains(err.Error(), "502") || dials != waitMaxFails {
+		t.Fatalf("waitReady error = %v after %d dials", err, dials)
+	}
+}
+
+// Past its time the wait ends, even with a terminal that never answers.
+func TestWaitReadyTimesOut(t *testing.T) {
+	const id, check = "p", "false"
+	env, _, _ := monitorEnv(t, id, script{})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := waitReady(ctx, env, id, 500*time.Millisecond, check); err == nil || err.Error() != "the plugin didn't get ready in 500ms" {
+		t.Fatalf("waitReady error = %v", err)
+	}
+}
+
+func TestParseWaitAnswer(t *testing.T) {
+	line := logReply(10, 4, "abcdef", "yes").out("n")
+	rest := strings.TrimPrefix(line, "@@WR n ")
+	if a, ok := parseWaitAnswer(rest, 4); !ok || a.size != 10 || a.from != 4 || string(a.data) != "abcdef" || !a.running {
+		t.Errorf("good answer: %+v %v", a, ok)
+	}
+	for name, bad := range map[string]string{
+		"cut":      rest[:len(rest)-4],
+		"checksum": strings.Replace(rest, "yes", "no ", 1),
+		"range":    strings.TrimPrefix(logReply(10, 4, "abc", "yes").out("n"), "@@WR n "),
+		"empty":    "",
+	} {
+		if _, ok := parseWaitAnswer(bad, 4); ok {
+			t.Errorf("%s answer taken", name)
+		}
 	}
 }

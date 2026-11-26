@@ -451,8 +451,8 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		Settings: settings,
 		Log:      func(f string, args ...any) { m.logf(s, f, args...) },
 		Phase:    func(p string) { m.Post(func() { s.PluginPhase = p }) },
-		Reconnect: func(ctx context.Context) (*colab.Shell, error) {
-			return m.reshell(ctx, s, a)
+		Stream: func(ctx context.Context, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
+			return m.stream(ctx, s, a, command, ready)
 		},
 	}
 	res, err := p.Deploy(ctx, env)
@@ -529,50 +529,56 @@ var errReplaced = errors.New("the session closed while a terminal was opened")
 
 const proxyRefreshBefore = 5 * time.Minute
 
-// reshell replaces the deployment's terminal on the same runtime. It
-// refreshes credentials when they are near expiry or the cached dial fails.
-func (m *Manager) reshell(ctx context.Context, s *Session, a *Account) (*colab.Shell, error) {
+// stream starts command on a terminal of its own on the session's
+// runtime, as colab.Stream does, for a plugin to talk to the agent. It
+// refreshes credentials when they are near expiry or the cached dial
+// fails, and keeps the refreshed ones for what dials next.
+func (m *Manager) stream(ctx context.Context, s *Session, a *Account, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
 	s.mu.Lock()
 	conn, id, gen := s.conn, s.rid, s.gen
 	s.mu.Unlock()
 	if id == "" {
-		return nil, errors.New("the session has no runtime")
+		return nil, nil, errors.New("the session has no runtime")
 	}
-	var sh *colab.Shell
+	var tty plugins.StreamConn
+	var r *bufio.Reader
 	var cachedErr error
 	if conn != nil && time.Until(conn.ExpireTime) > proxyRefreshBefore {
-		// Leave time in the reconnect deadline to refresh and dial again.
-		dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		sh, cachedErr = openShell(dialCtx, conn)
+		// Leave time in the deadline to refresh and dial again.
+		dialCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		tty, r, cachedErr = streamTTY(dialCtx, conn, command, ready)
 		cancel()
 	}
-	if sh == nil {
+	if tty == nil {
 		var err error
-		conn, err = runtimeConnection(ctx, a.Client, id)
-		if err != nil {
-			return nil, errors.Join(cachedErr, err)
+		if conn, err = runtimeConnection(ctx, a.Client, id); err != nil {
+			return nil, nil, errors.Join(cachedErr, err)
 		}
-		if sh, err = openShell(ctx, conn); err != nil {
-			return nil, errors.Join(cachedErr, err)
+		if tty, r, err = streamTTY(ctx, conn, command, ready); err != nil {
+			return nil, nil, errors.Join(cachedErr, err)
 		}
 	}
 	s.mu.Lock()
 	if s.gen != gen || s.rid != id || ctx.Err() != nil {
 		s.mu.Unlock()
-		sh.Close()
+		tty.Close()
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, errReplaced
+		return nil, nil, errReplaced
 	}
-	old := s.shell
-	s.shell, s.conn = sh, conn
+	s.conn = conn
 	s.mu.Unlock()
-	if old != nil {
-		old.Close()
+	return tty, r, nil
+}
+
+// streamTTY starts a command on a terminal of its own; tests replace it.
+var streamTTY = func(ctx context.Context, conn *colab.Connection, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
+	tty, r, err := colab.Stream(ctx, conn, command, ready)
+	if err != nil {
+		return nil, nil, err
 	}
-	m.logf(s, "Opened another terminal on runtime %s.", id)
-	return sh, nil
+	return tty, r, nil
 }
 
 // watchdogFor computes the runtime's limits: the schedule, and the time

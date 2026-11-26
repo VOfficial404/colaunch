@@ -96,10 +96,11 @@ func (t *TTY) Read(p []byte) (int, error) { return t.r.Read(p) }
 
 // WriteString types s into the terminal.
 func (t *TTY) WriteString(s string) error {
-	return t.writeString(context.Background(), s)
+	return t.WriteStringContext(context.Background(), s)
 }
 
-func (t *TTY) writeString(ctx context.Context, s string) error {
+// WriteStringContext types s into the terminal within ctx's deadline.
+func (t *TTY) WriteStringContext(ctx context.Context, s string) error {
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 	// Small messages: proxies limit what they read at once, Colab's too
@@ -182,7 +183,7 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 	}
 	s := newShell(tty)
 	go s.pump()
-	if err := tty.writeString(ctx, prelude); err != nil {
+	if err := tty.WriteStringContext(ctx, prelude); err != nil {
 		tty.Close()
 		return nil, err
 	}
@@ -192,11 +193,18 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 		return nil, ctx.Err()
 	case <-time.After(300 * time.Millisecond):
 	}
-	if err := tty.writeString(ctx, "stty -echo -onlcr 2>/dev/null; PS1=; PS2=; unset PROMPT_COMMAND\n"); err != nil {
+	if err := tty.WriteStringContext(ctx, "stty -echo -onlcr 2>/dev/null; PS1=; PS2=; unset PROMPT_COMMAND\n"); err != nil {
 		tty.Close()
 		return nil, err
 	}
-	if _, _, err := s.Run(ctx, "true"); err != nil {
+	// One marker of a nonce of its own tells the shell reads commands:
+	// typed, it has quotes inside, so the terminal's echo doesn't match.
+	hello := randHex(8)
+	if err := tty.WriteStringContext(ctx, "echo @@H\"\"ELLO-"+hello+"@@\n"); err != nil {
+		tty.Close()
+		return nil, err
+	}
+	if _, _, err := s.wait(ctx, "@@HELLO-"+hello+"@@\n", false); err != nil {
 		tty.Close()
 		return nil, err
 	}
@@ -315,31 +323,13 @@ func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int
 // but its output had no complete START marker.
 var ErrMissingStart = errors.New("colab: missing command start marker")
 
-type missingStartError struct {
-	n      int
-	before string
-	status int
+type missingStartError int
+
+func (n missingStartError) Error() string {
+	return fmt.Sprintf("colab: the output of command %d has no start", n)
 }
 
-func (e *missingStartError) Error() string {
-	return fmt.Sprintf("colab: the output of command %d has no start", e.n)
-}
-
-func (*missingStartError) Unwrap() error { return ErrMissingStart }
-
-// MissingStartOutput returns, for an error of Run with ErrMissingStart,
-// everything the terminal printed after the previous command's end and
-// before this one's, and the exit status END reported. Unlike Run's
-// output, it may hold more than the command printed, or less: a caller
-// may use it only when it can tell, as by a token of its own that the
-// command prints, that what it holds is the command's output, whole.
-func MissingStartOutput(err error) (string, int, bool) {
-	var e *missingStartError
-	if !errors.As(err, &e) {
-		return "", -1, false
-	}
-	return e.before, e.status, true
-}
+func (missingStartError) Unwrap() error { return ErrMissingStart }
 
 // Run runs a bash command and returns what it printed, stdout and stderr
 // together, and its exit status.
@@ -362,7 +352,7 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	// Typed, the markers have quotes inside; printed, they have none. The
 	// command runs in a subshell, so that its exit or cd leaves the shell be.
 	line := fmt.Sprintf("echo @@S\"\"TART-%d@@; (eval \"$(echo %s | base64 -d)\") </dev/null 2>&1; echo \"@@E\"\"ND-%d:$?@@\"\n", n, enc, n)
-	if err := s.tty.writeString(ctx, line); err != nil {
+	if err := s.tty.WriteStringContext(ctx, line); err != nil {
 		return "", -1, err
 	}
 	before, code, err := s.wait(ctx, fmt.Sprintf("@@END-%d:", n), true)
@@ -372,7 +362,7 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
 	i := bytes.LastIndex(before, startMark)
 	if i < 0 {
-		return "", -1, &missingStartError{n: n, before: string(before), status: code}
+		return "", -1, missingStartError(n)
 	}
 	return string(before[i+len(startMark):]), code, nil
 }
@@ -410,7 +400,7 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 		"if [ $__s = 0 ]; then if [ -d \"$__f\" ] && [ ! -L \"$__f\" ]; then __s=1; else mv -f \"$__p\" \"$__f\"; __s=$?; fi; fi; [ $__s = 0 ] || rm -f \"$__p\"; fi; "+
 		"echo \"@@D\"\"ONE-%d:$__s@@\"\n",
 		vars, prep, n, len(enc), n)
-	if err := s.tty.writeString(ctx, cmd); err != nil {
+	if err := s.tty.WriteStringContext(ctx, cmd); err != nil {
 		return err
 	}
 	_, code, err := s.wait(ctx, fmt.Sprintf("@@READY-%d:", n), true)
@@ -418,7 +408,7 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 		return err
 	}
 	if code == 0 {
-		if err := s.tty.writeString(ctx, enc); err != nil {
+		if err := s.tty.WriteStringContext(ctx, enc); err != nil {
 			return err
 		}
 	}
@@ -450,12 +440,17 @@ func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY,
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := tty.WriteString(prelude); err != nil {
+	if err := tty.WriteStringContext(ctx, prelude); err != nil {
 		tty.Close()
 		return nil, nil, err
 	}
-	time.Sleep(300 * time.Millisecond)
-	if err := tty.WriteString("stty raw -echo; exec " + command + "\n"); err != nil {
+	select {
+	case <-ctx.Done():
+		tty.Close()
+		return nil, nil, ctx.Err()
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tty.WriteStringContext(ctx, "stty raw -echo; exec "+command+"\n"); err != nil {
 		tty.Close()
 		return nil, nil, err
 	}
@@ -478,14 +473,14 @@ func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY,
 	case err := <-found:
 		if err != nil {
 			tty.Close()
-			return nil, nil, fmt.Errorf("colab: %s ended before it was ready: %w", command, err)
+			return nil, nil, fmt.Errorf("colab: the terminal command ended before it was ready: %w", err)
 		}
 	case <-ctx.Done():
 		tty.Close()
 		return nil, nil, ctx.Err()
 	case <-time.After(45 * time.Second):
 		tty.Close()
-		return nil, nil, errors.New("colab: " + command + " didn't start")
+		return nil, nil, errors.New("colab: the terminal command didn't start")
 	}
 	return tty, r, nil
 }

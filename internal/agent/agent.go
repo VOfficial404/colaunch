@@ -27,6 +27,13 @@ const MuxReady = "@@COLAUNCH-MUX-READY@@"
 // MuxCommand starts the tunnel.
 const MuxCommand = "python3 -u " + Path + " mux"
 
+// WaitReadyCommand starts the agent's deployment monitor. The marker
+// identifies this terminal so replayed output can't finish its handshake.
+func WaitReadyCommand(id string, limit int, nonce string) (command, marker string) {
+	marker = "@@COLAUNCH-WAIT-READY-" + nonce + "@@"
+	return fmt.Sprintf("python3 -u %s wait-ready %s %d %s", Path, shellQuote(id), limit, shellQuote(marker)), marker
+}
+
 // Install puts the agent on the runtime, in a folder only its owner
 // reads.
 func Install(ctx context.Context, sh *colab.Shell) error {

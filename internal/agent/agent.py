@@ -7,8 +7,8 @@
 #   agent.py status            print the runtime's state as JSON
 #   agent.py run ID SCRIPT     run a plugin's script in the background
 #   agent.py running ID        print yes, no, or unknown for a plugin
-#   agent.py wait-log ID TOKEN OFFSET LIMIT
-#                              print liveness and one base64 log chunk
+#   agent.py wait-ready ID LIMIT MARKER
+#                              answer readiness requests over stdin and stdout
 #   agent.py stop ID           stop a plugin
 #   agent.py logs ID [LINES]   print the end of a plugin's log
 #   agent.py unassign REASON   give the runtime back to Colab now
@@ -36,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 
 VERSION = "1"
 HOME = os.environ.get("COLAUNCH_HOME") or (
@@ -437,7 +438,9 @@ def running(pid_name):
     return "yes" if owned else "no"
 
 
-def wait_log(pid_name, token, offset, limit):
+def wait_chunk(pid_name, offset, limit):
+    """Liveness and one chunk of a plugin's log from offset: all of the
+    chunk's bytes, or, once the plugin stopped, the last unread ones."""
     # Check liveness before reading so a stopped plugin's final output is included.
     try:
         run = running(pid_name)
@@ -456,8 +459,53 @@ def wait_log(pid_name, token, offset, limit):
             data = f.read(n)
     except FileNotFoundError:
         size, offset, data = 0, 0, b""
-    encoded = base64.b64encode(data).decode("ascii")
-    print("@@WAIT %s %d %d %s@@\n%s" % (token, size, offset, run, encoded))
+    return size, offset, run, data
+
+
+def wait_ready(pid_name, limit, marker):
+    """Answers the app's requests, one a line, while it waits for a plugin
+    to get ready: `W nonce offset base64(check)` gets, on one line,
+    `@@WR nonce crc32 payload@@`, where payload is `ready` when the check
+    passes and `log size from running base64` when it doesn't. The nonce
+    and the checksum let the app tell a whole answer to its request from
+    anything else the terminal prints."""
+    plugin_dir(pid_name)
+    stdin = os.fdopen(0, "rb", buffering=0)
+
+    def send(line):
+        view = memoryview((line + "\n").encode())
+        while view:
+            view = view[os.write(1, view):]
+
+    send(marker)
+    buf = b""
+    while True:
+        chunk = stdin.read(65536)
+        if not chunk:
+            return
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            parts = line.decode("ascii", "replace").strip().split(" ")
+            if len(parts) != 4 or parts[0] != "W":
+                continue
+            try:
+                offset = int(parts[2])
+                check = base64.b64decode(parts[3]).decode()
+            except ValueError:
+                continue
+            try:
+                ok = subprocess.run([shutil.which("bash") or "bash", "-c", check], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=60).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            if ok:
+                payload = "ready"
+            else:
+                size, start, run, data = wait_chunk(pid_name, offset, limit)
+                payload = "log %d %d %s %s" % (size, start, run, base64.b64encode(data).decode("ascii"))
+            send("@@WR %s %08x %s@@" % (parts[1], zlib.crc32(payload.encode()), payload))
 
 
 def stop(pid_name, quiet=False, forget=False):
@@ -671,8 +719,8 @@ def main():
         run(sys.argv[2], sys.argv[3])
     elif cmd == "running":
         print(running(sys.argv[2]))
-    elif cmd == "wait-log":
-        wait_log(sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))
+    elif cmd == "wait-ready":
+        wait_ready(sys.argv[2], int(sys.argv[3]), sys.argv[4])
     elif cmd == "stop":
         stop(sys.argv[2], forget=True)
     elif cmd == "prepare":

@@ -261,6 +261,8 @@ func TestExplainError(t *testing.T) {
 		"google: the account's sign-in expired or was revoked":    "err.signed_out",
 		"google: no OAuth client is configured (Settings → ...)":  "err.no_client",
 		"colab: the output of command 18 has no start":            "err.terminal_output",
+		"invalid readiness probe response":                        "err.terminal_output",
+		"the readiness probe didn't answer":                       "err.terminal_output",
 		"hf: no such repository, or it needs an access token":     "err.hf_not_found",
 		"gave up after 3 tries in 1m: " + colab.ErrQuota.Error():  "err.quota",
 		"hf: no quantization of the model fits in this machine's": "err.too_big",

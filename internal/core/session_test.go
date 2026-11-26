@@ -2,8 +2,13 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,13 +16,15 @@ import (
 
 	"colaunch/internal/agent"
 	"colaunch/internal/colab"
+	"colaunch/internal/plugins"
 	"colaunch/internal/tunnel"
 )
 
 type nopTransport struct{ r *io.PipeWriter }
 
-func (nopTransport) WriteString(string) error { return nil }
-func (t nopTransport) Close() error           { return t.r.Close() }
+func (nopTransport) WriteString(string) error                         { return nil }
+func (nopTransport) WriteStringContext(context.Context, string) error { return nil }
+func (t nopTransport) Close() error                                   { return t.r.Close() }
 
 // fakeStream replaces the mux's terminal with one that answers after
 // release is closed, counting the dials.
@@ -227,4 +234,72 @@ func acct(email string) *Account {
 	a := &Account{}
 	a.Email = email
 	return a
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Waiting for a plugin opens its terminals with the runtime's credentials,
+// refreshed from Colab's API when they are near expiry or don't dial, and
+// keeps them; a session stopped meanwhile gets none.
+func TestStreamRefreshesConnection(t *testing.T) {
+	var lookups atomic.Int32
+	fresh := &colab.Connection{URL: "https://fresh", Token: "new", ExpireTime: time.Now().Add(time.Hour)}
+	a := &Account{Client: &colab.Client{
+		Token: func(context.Context) (string, error) { return "access", nil },
+		HTTP: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			lookups.Add(1)
+			b, _ := json.Marshal(colab.Runtime{Name: "runtimes/rt", Connection: fresh})
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(b)), Request: r}, nil
+		})},
+	}}
+	var dialed []string
+	var onDial func()
+	old := streamTTY
+	streamTTY = func(ctx context.Context, conn *colab.Connection, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
+		dialed = append(dialed, conn.Token)
+		if onDial != nil {
+			onDial()
+		}
+		if conn.Token == "stale" {
+			return nil, nil, errors.New("colab: terminal: 403")
+		}
+		r, w := io.Pipe()
+		return nopTransport{w}, bufio.NewReader(r), nil
+	}
+	t.Cleanup(func() { streamTTY = old })
+	m := &Manager{}
+	for _, tc := range []struct {
+		name  string
+		conn  *colab.Connection
+		dials string
+	}{
+		{"expiring", &colab.Connection{Token: "old", ExpireTime: time.Now().Add(time.Minute)}, "new"},
+		{"refused", &colab.Connection{Token: "stale", ExpireTime: time.Now().Add(time.Hour)}, "stale new"},
+		{"valid", &colab.Connection{Token: "old", ExpireTime: time.Now().Add(time.Hour)}, "old"},
+	} {
+		dialed = nil
+		s := &Session{}
+		s.rid, s.conn = "rt", tc.conn
+		tty, _, err := m.stream(t.Context(), s, a, "cmd", "ready")
+		if err != nil || strings.Join(dialed, " ") != tc.dials {
+			t.Errorf("%s: dialed %q, %v", tc.name, dialed, err)
+			continue
+		}
+		tty.Close()
+		if want := strings.Fields(tc.dials); s.conn.Token != want[len(want)-1] {
+			t.Errorf("%s: kept %q", tc.name, s.conn.Token)
+		}
+	}
+	if lookups.Load() != 2 {
+		t.Errorf("%d lookups", lookups.Load())
+	}
+
+	s := &Session{}
+	s.rid, s.conn = "rt", &colab.Connection{Token: "old", ExpireTime: time.Now().Add(time.Hour)}
+	onDial = func() { s.mu.Lock(); s.gen++; s.mu.Unlock() }
+	if _, _, err := m.stream(t.Context(), s, a, "cmd", "ready"); !errors.Is(err, errReplaced) {
+		t.Errorf("stopped session: %v", err)
+	}
 }

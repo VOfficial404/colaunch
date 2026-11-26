@@ -1,6 +1,8 @@
 package plugins
 
 import (
+	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -89,18 +91,38 @@ runpy.run_path(sys.argv[1])["write_pid"](sys.argv[2], int(sys.argv[3]))`, script
 		t.Fatalf("PID record %s: %v", current, err)
 	}
 
-	probe := func(t *testing.T, off int, beforeRunning string) string {
-		t.Helper()
-		command := strings.Replace(waitReadyProbe(id, testProbeToken, int64(off), check),
-			"python3 "+ShellQuote(agent.Path), beforeRunning+ShellQuote(python)+" "+ShellQuote(script), 1)
-		cmd := exec.CommandContext(t.Context(), "bash", "-c", command)
-		cmd.Env = append(os.Environ(), "COLAUNCH_HOME="+home)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("probe: %s %v", out, err)
-		}
-		return string(out)
+	// The agent answers requests on its stdin, as on its terminal.
+	const readyMarker = "@@COLAUNCH-WAIT-READY-test@@"
+	mon := exec.Command(python, "-u", script, "wait-ready", id, strconv.Itoa(waitLogChunk), readyMarker)
+	mon.Env = append(os.Environ(), "COLAUNCH_HOME="+home)
+	monIn, _ := mon.StdinPipe()
+	monOut, _ := mon.StdoutPipe()
+	if err := mon.Start(); err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { monIn.Close(); mon.Wait() })
+	lines := bufio.NewReader(monOut)
+	if line, err := lines.ReadString('\n'); err != nil || strings.TrimSpace(line) != readyMarker {
+		t.Fatalf("agent started with %q, %v", line, err)
+	}
+	n := 0
+	probe := func(t *testing.T, off int, ck string) waitAnswer {
+		t.Helper()
+		n++
+		nonce := fmt.Sprintf("nonce%d", n)
+		fmt.Fprintf(monIn, "W %s %d %s\n", nonce, off, base64.StdEncoding.EncodeToString([]byte(ck)))
+		line, err := lines.ReadString('\n')
+		head := "@@WR " + nonce + " "
+		if err != nil || !strings.HasPrefix(line, head) {
+			t.Fatalf("answer %q, %v", line, err)
+		}
+		a, ok := parseWaitAnswer(line[len(head):], int64(off))
+		if !ok {
+			t.Fatalf("bad answer %q", line)
+		}
+		return a
+	}
+	running := map[string]bool{"yes": true, "no": false, "unknown": true}
 	for _, tc := range []struct{ name, record, want string }{
 		{"live JSON", string(current), "yes"},
 		{"live legacy", pid + "\n", "yes"},
@@ -110,24 +132,24 @@ runpy.run_path(sys.argv[1])["write_pid"](sys.argv[2], int(sys.argv[3]))`, script
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			write(pidPath, tc.record)
-			want := probeLog(len(log), 0, log, tc.want)
-			if got := probe(t, 0, ""); got != want {
-				t.Errorf("probe = %q, want %q", got, want)
+			a := probe(t, 0, check)
+			if a.ready || a.size != int64(len(log)) || a.from != 0 || string(a.data) != log || a.running != running[tc.want] {
+				t.Errorf("probe = %+v, want %s", a, tc.want)
 			}
 		})
 	}
 	ready.Store(true)
-	if got := probe(t, 0, ""); got != readyProbeOutput {
-		t.Errorf("ready probe = %q", got)
+	if a := probe(t, 0, check); !a.ready {
+		t.Errorf("ready probe = %+v", a)
 	}
 	ready.Store(false)
 
-	// Simulate the last error arriving just before the liveness check.
+	// The last error, written just before liveness is checked, is read.
 	write(pidPath, strconv.Itoa(os.Getpid()))
 	const finalError = "fatal: couldn't clone ComfyUI\n"
-	prefix := "printf '%s' " + ShellQuote(finalError) + " >> " + ShellQuote(logPath) + "; "
-	if got, want := probe(t, 0, prefix), probeLog(len(log+finalError), 0, log+finalError, "no"); got != want {
-		t.Errorf("final probe = %q, want %q", got, want)
+	appendErr := "printf '%s' " + ShellQuote(finalError) + " >> " + ShellQuote(logPath) + "; false"
+	if a := probe(t, 0, appendErr); a.running || string(a.data) != log+finalError {
+		t.Errorf("final probe = %+v", a)
 	}
 
 	const maxBytes = 16 << 10
@@ -135,22 +157,21 @@ runpy.run_path(sys.argv[1])["write_pid"](sys.argv[2], int(sys.argv[3]))`, script
 	backlog := strings.Repeat("x", maxBytes) + strings.Repeat("y", largeOffset-maxBytes) + strings.Repeat("z", maxBytes) + log + finalError
 	write(logPath, backlog)
 	for _, tc := range []struct {
-		name, record, running string
-		off, from             int
+		name, record string
+		running      bool
+		off, from    int
 	}{
-		{"first chunk", string(current), "yes", 0, 0},
-		{"next chunk", string(current), "yes", maxBytes, maxBytes},
-		{"large offset", string(current), "yes", largeOffset, largeOffset},
-		{"log shrank", string(current), "yes", len(backlog) + 1, 0},
-		{"stopped tail", strconv.Itoa(os.Getpid()), "no", 0, len(backlog) - maxBytes},
+		{"first chunk", string(current), true, 0, 0},
+		{"next chunk", string(current), true, maxBytes, maxBytes},
+		{"large offset", string(current), true, largeOffset, largeOffset},
+		{"log shrank", string(current), true, len(backlog) + 1, 0},
+		{"stopped tail", strconv.Itoa(os.Getpid()), false, 0, len(backlog) - maxBytes},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			write(pidPath, tc.record)
-			want := probeLog(len(backlog), tc.from, backlog[tc.from:tc.from+maxBytes], tc.running)
-			got := probe(t, tc.off, "")
-			if got != want {
-				head, _, _ := strings.Cut(got, "\n")
-				t.Errorf("probe has %d bytes and header %q, want %d bytes with log range [%d, %d)", len(got), head, len(want), tc.from, tc.from+maxBytes)
+			a := probe(t, tc.off, check)
+			if a.from != int64(tc.from) || a.running != tc.running || string(a.data) != backlog[tc.from:tc.from+maxBytes] {
+				t.Errorf("probe has %d bytes from %d, running %t; want [%d, %d)", len(a.data), a.from, a.running, tc.from, tc.from+maxBytes)
 			}
 		})
 	}

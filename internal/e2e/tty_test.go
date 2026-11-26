@@ -1,7 +1,3 @@
-// Package e2e runs Colaunch's side of a runtime against a stand-in for
-// Colab's terminal: a WebSocket that speaks /colab/tty's JSON to a bash in
-// a pseudo-terminal, as Colab's does. Where Python has no pty module, as
-// on Windows, the bash reads a pipe instead.
 package e2e
 
 import (
@@ -10,130 +6,22 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"colaunch/internal/agent"
 	"colaunch/internal/colab"
 	"colaunch/internal/tunnel"
 )
 
-func python(t *testing.T) string {
-	if p := os.Getenv("COLAUNCH_TEST_PYTHON"); p != "" {
-		return p
-	}
-	if runtime.GOOS != "windows" {
-		if p, err := exec.LookPath("python3"); err == nil {
-			return p
-		}
-	}
-	t.Skip("no Python: set COLAUNCH_TEST_PYTHON")
-	return ""
-}
-
-// gitBash finds Git's bash on Windows, not System32's, which starts WSL.
-func gitBash(t *testing.T) string {
-	if p := os.Getenv("COLAUNCH_TEST_BASH"); p != "" {
-		return p
-	}
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Skip("no Git bash")
-	}
-	for _, rel := range []string{"../bin/bash.exe", "../../bin/bash.exe", "../usr/bin/bash.exe"} {
-		p := filepath.Join(filepath.Dir(git), rel)
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	t.Skip("no Git bash")
-	return ""
-}
-
-// fakeColab serves /colab/tty as Colab's proxy does, behind its token.
-func fakeColab(t *testing.T) *colab.Connection {
-	py := python(t)
-	// The shim below is named python3: it must not find itself.
-	if abs, err := exec.LookPath(py); err == nil {
-		py = abs
-	}
-	bin := t.TempDir()
-	// The terminal's python3 is the test's.
-	os.WriteFile(filepath.Join(bin, "python3"), []byte("#!/bin/sh\nexec \""+filepath.ToSlash(py)+"\" \"$@\"\n"), 0o755)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/colab/tty" || r.Header.Get("X-Colab-Runtime-Proxy-Token") != "secret" {
-			http.Error(w, "no", http.StatusForbidden)
-			return
-		}
-		ws, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer ws.CloseNow()
-		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.Command(gitBash(t))
-		} else {
-			cmd = exec.Command(py, "-c", "import pty; pty.spawn(['bash', '--norc', '-i'])")
-		}
-		cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "TERM=xterm")
-		stdin, _ := cmd.StdinPipe()
-		stdout, _ := cmd.StdoutPipe()
-		cmd.Stderr = cmd.Stdout
-		if os.Getenv("E2E_DEBUG") != "" {
-			t.Logf("starting %v", cmd.Args)
-		}
-		if err := cmd.Start(); err != nil {
-			t.Error(err)
-			return
-		}
-		defer cmd.Process.Kill()
-		go func() {
-			b := make([]byte, 32<<10)
-			for {
-				n, err := stdout.Read(b)
-				if os.Getenv("E2E_DEBUG") != "" {
-					t.Logf("tty> %q %v", b[:n], err)
-				}
-				if n > 0 {
-					msg, _ := json.Marshal(map[string]string{"data": string(b[:n])})
-					ws.Write(context.Background(), websocket.MessageText, msg)
-				}
-				if err != nil {
-					ws.Close(websocket.StatusNormalClosure, "")
-					return
-				}
-			}
-		}()
-		for {
-			_, data, err := ws.Read(context.Background())
-			if err != nil {
-				return
-			}
-			var m struct {
-				Data *string `json:"data"`
-			}
-			if json.Unmarshal(data, &m) == nil && m.Data != nil {
-				io.WriteString(stdin, *m.Data)
-			}
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return &colab.Connection{URL: srv.URL, Token: "secret", ExpireTime: time.Now().Add(time.Hour)}
-}
+func fakeColab(t *testing.T) *colab.Connection { return Colab(t, nil) }
 
 // Commands run on the terminal give back what they printed and their
 // status, apart from the terminal's echo and prompts.
@@ -164,6 +52,28 @@ func TestShellRun(t *testing.T) {
 		out, _, err := sh.Run(ctx, fmt.Sprintf("echo %d", i))
 		if err != nil || strings.TrimSpace(out) != fmt.Sprint(i) {
 			t.Errorf("command %d: %q %v", i, out, err)
+		}
+	}
+}
+
+// A new terminal that first prints an earlier one's output, as an END
+// with no START, still opens, and its commands read their own output: the
+// shell is ready on a marker of a nonce of its own.
+func TestOpenShellAfterStaleOutput(t *testing.T) {
+	conn := Colab(t, func(int) Faults {
+		return Faults{Stale: "@@START-1@\r\n@@END-1:0@@\r\n@@END-2:0@@\r\n@@HELLO-0123456789abcdef@@\r\n"}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	sh, err := colab.OpenShell(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sh.Close()
+	for i := range 2 {
+		out, code, err := sh.Run(ctx, fmt.Sprintf("echo %d; exit 4", i))
+		if err != nil || code != 4 || strings.TrimSpace(out) != fmt.Sprint(i) {
+			t.Errorf("command %d: %q, %d, %v", i, out, code, err)
 		}
 	}
 }

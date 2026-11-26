@@ -5,6 +5,7 @@
 package plugins
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"regexp"
 	"sort"
 	"strconv"
@@ -132,11 +134,18 @@ type Env struct {
 	Log func(format string, args ...any)
 	// Phase tells the app what the plugin is doing now, to show.
 	Phase func(phase string)
-	// Reconnect, if set, opens another terminal on the same runtime, in
-	// place of Shell, which it closes, for when Shell stopped answering.
-	// What runs on the runtime is left be. Waiting for a plugin to get
-	// ready uses it, and sets Shell to what it returns.
-	Reconnect func(ctx context.Context) (*colab.Shell, error)
+	// Stream starts command in a terminal of its own on the same runtime,
+	// as colab.Stream does, refreshing the runtime's credentials when it
+	// must. Waiting for a plugin to get ready talks to the agent through
+	// it, and opens another when one stops answering; what runs on the
+	// runtime is left be.
+	Stream func(ctx context.Context, command, ready string) (StreamConn, *bufio.Reader, error)
+}
+
+// StreamConn is the input of a terminal Env.Stream opened.
+type StreamConn interface {
+	WriteStringContext(ctx context.Context, s string) error
+	Close() error
 }
 
 // Plugin is something to run on a runtime.
@@ -231,27 +240,31 @@ func checkRequired(p Plugin, values map[string]string, lang string) error {
 const (
 	waitLogChunk         = 16 << 10
 	waitReconnectTimeout = 2 * time.Minute
+	// waitMaxMisses is how many bad answers in a row one terminal may give
+	// before another is opened, and waitMaxFails how many terminals in a
+	// row may fail before waiting gives up.
+	waitMaxMisses = 2
+	waitMaxFails  = 4
 )
 
-// waitProbeTimeout bounds one probe: a terminal that doesn't answer in it
-// is given up for another.
+// waitProbeTimeout bounds one request: a terminal that doesn't answer in
+// it is given up for another.
 var waitProbeTimeout = 2 * time.Minute
 
-// waitReadyProbe builds the command that runs the check. If the check fails,
-// it reports liveness and at most one chunk of log bytes, in base64 to
-// preserve carriage returns. Once stopped, read the end for diagnostics.
-// Its markers carry token, new for each probe, so that its answer can be
-// told from any other's.
-func waitReadyProbe(id, token string, off int64, check string) string {
-	// Keep the built-in probes short enough for Shell.Run to send inline.
-	return fmt.Sprintf(`if (%s) >/dev/null 2>&1 </dev/null; then
-  echo "@@WAIT-READY %s@@"
-else
-  python3 %s wait-log %s %s %d %d
-fi`, check, token, ShellQuote(agent.Path), ShellQuote(id), ShellQuote(token), off, waitLogChunk)
-}
+// waitPollInterval is how long to wait between polls once the log is
+// read, and waitReopenDelay before opening a terminal after another
+// failed.
+var (
+	waitPollInterval = 4 * time.Second
+	waitReopenDelay  = 3 * time.Second
+)
 
-// newProbeToken is a probe's token; tests replace it.
+var (
+	errBadAnswer = errors.New("invalid readiness probe response")
+	errNoAnswer  = errors.New("the readiness probe didn't answer")
+)
+
+// newProbeToken is a request's nonce; tests replace it.
 var newProbeToken = func() string {
 	b := make([]byte, 6)
 	rand.Read(b)
@@ -267,37 +280,31 @@ type waitAnswer struct {
 	data       []byte
 }
 
-// parseWaitAnswer reads the answer, with token, of the probe of the log
-// from off. Exactly one answer must be in out, and end it, whole: its
-// header well formed and the bytes as many as it says. What comes before
-// the answer is allowed, for output whose start marker the terminal lost.
-func parseWaitAnswer(out, token string, off int64) (waitAnswer, bool) {
-	ready := "@@WAIT-READY " + token + "@@\n"
-	head := "@@WAIT " + token + " "
-	nr, nh := strings.Count(out, ready), strings.Count(out, head)
-	if nr == 1 && nh == 0 && strings.HasSuffix(out, ready) {
+// parseWaitAnswer reads what follows "@@WR nonce " on the agent's line,
+// "crc32 payload@@", for the request of the log from off. The checksum
+// must match and the payload be whole: its fields well formed and the
+// bytes as many as the agent's range says.
+func parseWaitAnswer(rest string, off int64) (waitAnswer, bool) {
+	rest = strings.TrimRight(rest, "\r\n")
+	rest, closed := strings.CutSuffix(rest, "@@")
+	sum, payload, ok := strings.Cut(rest, " ")
+	if !closed || !ok || len(sum) != 8 || fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(payload))) != sum {
+		return waitAnswer{}, false
+	}
+	if payload == "ready" {
 		return waitAnswer{ready: true}, true
 	}
-	if nr != 0 || nh != 1 {
+	f := strings.Split(payload, " ")
+	if len(f) != 5 || f[0] != "log" {
 		return waitAnswer{}, false
 	}
-	line, data, ok := strings.Cut(out[strings.Index(out, head)+len(head):], "\n")
-	enc, last := strings.CutSuffix(data, "\n")
-	line, closed := strings.CutSuffix(line, "@@")
-	f := strings.Split(line, " ")
-	if !ok || !last || !closed || len(f) != 3 || strings.Contains(enc, "\n") {
+	size, err1 := strconv.ParseInt(f[1], 10, 64)
+	from, err2 := strconv.ParseInt(f[2], 10, 64)
+	run := f[3]
+	if err1 != nil || err2 != nil || size < 0 || (run != "yes" && run != "no" && run != "unknown") {
 		return waitAnswer{}, false
 	}
-	size, err1 := strconv.ParseInt(f[0], 10, 64)
-	from, err2 := strconv.ParseInt(f[1], 10, 64)
-	run := f[2]
-	if err1 != nil || err2 != nil || (run != "yes" && run != "no" && run != "unknown") {
-		return waitAnswer{}, false
-	}
-	if size < 0 {
-		return waitAnswer{}, false
-	}
-	// Mirror the probe's range: start at off (or zero after a shrink),
+	// Mirror the agent's range: start at off (or zero after a shrink),
 	// and take the last unread chunk if the plugin has stopped.
 	wantFrom := off
 	if off > size {
@@ -307,56 +314,107 @@ func parseWaitAnswer(out, token string, off int64) (waitAnswer, bool) {
 	if run == "no" {
 		wantFrom = size - n
 	}
-	b, err := base64.StdEncoding.DecodeString(enc)
-	if err != nil || from != wantFrom || int64(len(b)) != n {
+	data, err := base64.StdEncoding.DecodeString(f[4])
+	if err != nil || from != wantFrom || int64(len(data)) != n {
 		return waitAnswer{}, false
 	}
-	return waitAnswer{size: size, from: from, running: run != "no", data: b}, true
+	return waitAnswer{size: size, from: from, running: run != "no", data: data}, true
 }
 
-// runWaitProbe reports whether END was consumed, so an unusable answer can
-// be retried on the same shell when the next command can still run there.
-func runWaitProbe(ctx context.Context, sh *colab.Shell, id string, off int64, check string) (waitAnswer, bool, error) {
-	token := newProbeToken()
-	runCtx, cancel := context.WithTimeout(ctx, waitProbeTimeout)
-	defer cancel()
-	out, status, err := sh.Run(runCtx, waitReadyProbe(id, token, off, check))
-	if before, endStatus, ok := colab.MissingStartOutput(err); ok {
-		out, status = before, endStatus
-	} else if err != nil {
-		return waitAnswer{}, false, err
+// waitMonitor is `agent.py wait-ready` on a terminal of its own: it runs
+// the check and reads the log for each request, and answers on one line
+// that carries the request's nonce, so that nothing else the terminal
+// prints, nor an answer to an earlier request, is taken for it.
+type waitMonitor struct {
+	conn  StreamConn
+	lines chan string
+	done  chan struct{}
+	err   error // why lines closed
+}
+
+func openWaitMonitor(ctx context.Context, env *Env, id string) (*waitMonitor, error) {
+	command, ready := agent.WaitReadyCommand(id, waitLogChunk, rand.Text())
+	conn, r, err := env.Stream(ctx, command, ready)
+	if err != nil {
+		return nil, err
 	}
-	if status != 0 {
-		statusErr := fmt.Errorf("readiness probe exited with status %d", status)
-		if err != nil {
-			statusErr = fmt.Errorf("%w: %v", err, statusErr)
+	m := &waitMonitor{conn: conn, lines: make(chan string, 16), done: make(chan struct{})}
+	go func() {
+		defer close(m.lines)
+		for {
+			line, err := r.ReadSlice('\n')
+			if err != nil {
+				m.err = err
+				return
+			}
+			select {
+			case m.lines <- string(line):
+			case <-m.done:
+				return
+			}
 		}
-		return waitAnswer{}, true, statusErr
+	}()
+	return m, nil
+}
+
+func (m *waitMonitor) close() {
+	close(m.done)
+	m.conn.Close()
+}
+
+// probe asks whether the plugin is ready and, if not, for its log from off.
+func (m *waitMonitor) probe(ctx context.Context, off int64, check string) (waitAnswer, error) {
+	nonce := newProbeToken()
+	req := fmt.Sprintf("W %s %d %s\n", nonce, off, base64.StdEncoding.EncodeToString([]byte(check)))
+	probeCtx, cancel := context.WithTimeout(ctx, waitProbeTimeout)
+	defer cancel()
+	if err := m.conn.WriteStringContext(probeCtx, req); err != nil {
+		return waitAnswer{}, err
 	}
-	if a, ok := parseWaitAnswer(out, token, off); ok {
-		return a, true, nil
+	head := "@@WR " + nonce + " "
+	for {
+		select {
+		case line, ok := <-m.lines:
+			if !ok {
+				return waitAnswer{}, fmt.Errorf("colab: the terminal closed: %w", m.err)
+			}
+			i := strings.LastIndex(line, head)
+			if i < 0 {
+				continue
+			}
+			if a, ok := parseWaitAnswer(line[i+len(head):], off); ok {
+				return a, nil
+			}
+			return waitAnswer{}, errBadAnswer
+		case <-probeCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return waitAnswer{}, err
+			}
+			return waitAnswer{}, errNoAnswer
+		}
 	}
-	if err == nil {
-		err = errors.New("invalid readiness probe response")
-	}
-	return waitAnswer{}, true, err
 }
 
 // waitReady polls check every few seconds until it's true, the plugin's
 // process ends, or ctx is done. Each poll shows the log's new lines.
 //
-// If END arrives but the probe fails or its answer is incomplete, retry
-// from the last confirmed log offset on the same terminal first. A closed
-// or unresponsive terminal is replaced immediately if Reconnect is set.
+// The polls go to the agent on a terminal of its own (waitMonitor). A bad
+// answer is asked again from the last confirmed log offset; a terminal
+// that closes, doesn't answer, or keeps answering badly is replaced by
+// another on the same runtime, the plugin left running.
 func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check string) error {
+	if env.Stream == nil {
+		return errors.New("plugins: no terminal to wait for the plugin on")
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	maxMisses := 3
-	if env.Reconnect != nil {
-		maxMisses = 2
-	}
-	const maxReconnects = 3
-	var misses, reconnects int
+	var mon *waitMonitor
+	defer func() {
+		if mon != nil {
+			mon.close()
+		}
+	}()
+	var misses, fails int
 	var off int64
 	var carry []byte
 	var recent []string
@@ -365,50 +423,52 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			env.Log(format, args...)
 		}
 	}
-probe:
 	for probeCtx.Err() == nil {
-		a, hasEnd, err := runWaitProbe(probeCtx, env.Shell, id, off, check)
+		if mon == nil {
+			if fails > 1 {
+				select {
+				case <-probeCtx.Done():
+					continue
+				case <-time.After(waitReopenDelay):
+				}
+			}
+			openCtx, openCancel := context.WithTimeout(probeCtx, waitReconnectTimeout)
+			m, err := openWaitMonitor(openCtx, env, id)
+			openCancel()
+			if probeCtx.Err() != nil {
+				if m != nil {
+					m.close()
+				}
+				break
+			}
+			if err != nil {
+				if fails++; fails >= waitMaxFails {
+					return fmt.Errorf("opening a terminal to wait on: %w", err)
+				}
+				logf("✗ %v", err)
+				continue
+			}
+			mon, misses = m, 0
+		}
+		a, err := mon.probe(probeCtx, off, check)
 		if probeCtx.Err() != nil {
 			break
 		}
 		if err != nil {
-			if hasEnd {
-				misses++
-				if misses < maxMisses {
+			if errors.Is(err, errBadAnswer) {
+				if misses++; misses < waitMaxMisses {
 					continue
 				}
 			}
-			for env.Reconnect != nil && reconnects < maxReconnects {
-				if reconnects > 0 {
-					select {
-					case <-probeCtx.Done():
-						break probe
-					case <-time.After(3 * time.Second):
-					}
-				}
-				if probeCtx.Err() != nil {
-					break probe
-				}
-				reconnects++
-				logf("The terminal stopped answering (%v); opening another to read on.", err)
-				reconnectCtx, reconnectCancel := context.WithTimeout(probeCtx, waitReconnectTimeout)
-				sh, rerr := env.Reconnect(reconnectCtx)
-				reconnectCancel()
-				if probeCtx.Err() != nil {
-					break probe
-				}
-				if rerr == nil {
-					env.Shell, misses = sh, 0
-					continue probe
-				}
-				logf("✗ %v", rerr)
-				if reconnects == maxReconnects {
-					return fmt.Errorf("%w (opening another terminal: %v)", err, rerr)
-				}
+			mon.close()
+			mon = nil
+			if fails++; fails >= waitMaxFails {
+				return err
 			}
-			return err
+			logf("The terminal stopped answering (%v); opening another to read on.", err)
+			continue
 		}
-		misses, reconnects = 0, 0
+		misses, fails = 0, 0
 		if a.ready {
 			return nil
 		}
@@ -432,7 +492,7 @@ probe:
 		}
 		select {
 		case <-probeCtx.Done():
-		case <-time.After(4 * time.Second):
+		case <-time.After(waitPollInterval):
 		}
 	}
 	if err := ctx.Err(); err != nil {
