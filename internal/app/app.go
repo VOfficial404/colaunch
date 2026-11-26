@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"github.com/egoist/mygo"
-	"github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/ui"
 	// MyGo's own controls, in Chinese.
 	_ "github.com/egoist/mygo/locales/zh-Hans"
@@ -63,6 +62,7 @@ type App struct {
 	risky    riskyState
 	domains  domainsState
 	tasks    tasksState
+	update   updateState
 	// details are the errors whose details are open, by notice.
 	details map[string]bool
 
@@ -77,8 +77,9 @@ func Run() error {
 	if isDesktop() && !mygo.App.RequestSingleInstanceLock() {
 		return nil
 	}
-	// Updates, in a window of native UI: the app needs no webview.
-	mygo.Use(native.Plugin)
+	// Updates install in MyGo's window, in native UI: the app needs no
+	// webview. The app checks for them itself (update.go).
+	mygo.Use(updatePlugin())
 	mygo.App.SetLanguages(i18n.Languages...)
 	dir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
@@ -133,6 +134,7 @@ func Run() error {
 		a.initDesktopBackground()
 		a.initMobileBackground()
 		m.Start()
+		a.initUpdates(dir)
 		if link := a.tasks.pendingLink; link != "" {
 			a.tasks.pendingLink = ""
 			a.win.Update(func() { a.openLink(link) })
@@ -187,6 +189,7 @@ func (a *App) view(c *ui.Context) {
 	} else {
 		a.wide(c)
 	}
+	a.updateDialog(c)
 	a.queueBackgroundSync()
 }
 
@@ -279,6 +282,9 @@ func (a *App) wide(c *ui.Context) {
 					}
 				}
 			}).Grow(1)
+			if a.updateOffered() {
+				a.updateNotice(c)
+			}
 			a.accountFooter(c)
 		})
 		ui.Column(c).Grow(1).Children(func() { a.content(c) })
@@ -303,7 +309,12 @@ func (a *App) narrow(c *ui.Context) {
 					if active {
 						pill.Background(accent.Alpha(0.16))
 					}
-					pill.Children(func() { ui.Icon(c, it.icon).FontSize(20).TextColor(color) })
+					pill.Children(func() {
+						ui.Icon(c, it.icon).FontSize(20).TextColor(color)
+						if p == pageSettings && a.updateOffered() {
+							settingsDot(c)
+						}
+					})
 					label := ui.Text(c, i18n.T(it.key)).FontSize(11).TextColor(color).SingleLine()
 					if active {
 						label.Bold()

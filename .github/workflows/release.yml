@@ -154,6 +154,18 @@ jobs:
           "$aapt" dump xmltree build/android/*.apk AndroidManifest.xml > "$RUNNER_TEMP/colaunch-manifest.txt"
           grep -F 'dev.mygo.ColaunchBackgroundService' "$RUNNER_TEMP/colaunch-manifest.txt"
           grep -F 'android.permission.FOREGROUND_SERVICE_DATA_SYNC' "$RUNNER_TEMP/colaunch-manifest.txt"
+      # Users upgrade an APK only over one signed with the same key: with the
+      # upload key set, refuse an APK signed with the debug key.
+      - name: Verify the APK's signing key
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+          "$apksigner" verify --print-certs build/android/*.apk | tee "$RUNNER_TEMP/colaunch-certs.txt"
+          if [ -n "$ANDROID_KEYSTORE" ] && grep -q 'CN=Android Debug' "$RUNNER_TEMP/colaunch-certs.txt"; then
+            echo "::error::The APK is signed with the debug key although the upload key is set."
+            exit 1
+          fi
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
@@ -249,4 +261,30 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.draft-release.outputs.tag }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        # A table of what to download goes first in the notes: the release
+        # also holds what updates and install scripts use, which no one
+        # needs to pick.
+        run: |
+          v="${TAG#v}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          have="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')"
+          link() { if grep -qxF "$1" <<<"$have"; then echo "[$1]($base/$1)"; else echo "—"; fi; }
+          {
+            echo "## Download · 下载"
+            echo
+            echo "| System · 系统 | File · 文件 |"
+            echo "|---|---|"
+            echo "| Windows (x64) | $(link "colaunch-setup-$v-amd64.exe") |"
+            echo "| Windows (ARM) | $(link "colaunch-setup-$v-arm64.exe") |"
+            echo "| macOS (Apple Silicon · M 系列) | $(link "colaunch-$v-arm64.dmg") |"
+            echo "| macOS (Intel) | $(link "colaunch-$v-amd64.dmg") |"
+            echo "| Linux .deb (x64 · ARM) | $(link "colaunch_${v}_amd64.deb") · $(link "colaunch_${v}_arm64.deb") |"
+            echo "| Linux .rpm (x64 · ARM) | $(link "colaunch-$v-1.x86_64.rpm") · $(link "colaunch-$v-1.aarch64.rpm") |"
+            echo "| Android | $(link "colaunch-$v.apk") |"
+            echo "| iOS (sideload · 侧载) | $(link "colaunch-$v.ipa") |"
+            echo
+            echo "The other files are for automatic updates and install scripts: you don't need them. · 其余文件供自动更新和安装脚本使用，无需下载。"
+            echo
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body
+          } > notes.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md --draft=false --latest

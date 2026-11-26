@@ -2,6 +2,13 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.8]
+
+- Colaunch checks for updates on every platform: ten seconds after it starts, every 12 hours and when you come back to it. A new version shows above the account in the sidebar, or as a dot on Settings on phones, with its notes. On desktop **Update now** installs it; on Android **Download APK** gets the new APK; on iOS it opens the release to sideload. You can skip a version, and turn the checks off under **Settings → About**. Check by hand there too.
+- Releases start with a table of what to download for each system. The other files are for updates and install scripts.
+- Fewer files in each release: delta updates are made only from the version before. Older versions download the whole update.
+- The Android APK is now signed with Colaunch's own key, the same for every release from now on, so later versions install over it. **Uninstall the Android app once before installing this version**: earlier APKs were signed with a different key each time.
+
 ## [0.1.7]
 
 - Publish a runtime's port at a domain of your own through a named Cloudflare Tunnel, under the **Public links** risky feature. Paste a tunnel token you set up in Cloudflare Zero Trust, or give an API token and let Colaunch create the tunnel and the DNS record, reusing them the next time. It never overwrites a DNS record it didn't create.

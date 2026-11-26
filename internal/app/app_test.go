@@ -186,6 +186,24 @@ func TestPagesBuild(t *testing.T) {
 					}
 				}
 				tt.SetSize(size.w, size.h)
+				// An update: the sidebar's notice or the tab's dot, Settings'
+				// card, and the dialog on each platform.
+				for _, v := range updateViews(a, size.name == "phone") {
+					v.setup()
+					tt.Frame()
+					for _, s := range tt.Texts() {
+						if i18n.Has(s) {
+							t.Errorf("%s %s update %s shows the key %q", lang, size.name, v.name, s)
+						}
+					}
+					if !tt.HasText(v.want()) {
+						t.Errorf("%s %s update %s doesn't show %q", lang, size.name, v.name, v.want())
+					}
+					if shots != "" && lang != "zh-Hant" && !dark {
+						save(t, tt, filepath.Join(shots, fmt.Sprintf("update-%s-%s-%s.png", v.name, size.name, lang)))
+					}
+				}
+				a.update.open, a.update.has = false, false
 			}
 		}
 	}

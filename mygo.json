@@ -2,14 +2,15 @@
   "name": "Colaunch",
   "slug": "colaunch",
   "identifier": "io.github.vofficial404.colaunch",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "copyright": "© 2026 VOfficial404",
   "license": "MIT",
   "out": "build",
   "urlSchemes": ["colaunch"],
   "updates": {
     "publicKey": "IO688zWigofsijw3KRL3NhVWS+P0rrxsaOMuE+VrZWA=",
-    "github": "VOfficial404/colaunch"
+    "github": "VOfficial404/colaunch",
+    "deltas": 1
   },
   "windows": {
     "displayName": "Colaunch"

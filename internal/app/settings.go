@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo"
-	"github.com/egoist/mygo/plugins/updater"
 	"github.com/egoist/mygo/ui"
 
 	"colaunch/internal/i18n"
@@ -53,6 +52,9 @@ func (a *App) settingsPage(c *ui.Context) {
 	}
 	t := c.Theme()
 	pageScroll(c, i18n.T("nav.settings"), nil, func() {
+		if isNarrow(c) && a.updateOffered() {
+			a.updateCard(c)
+		}
 		if isNarrow(c) {
 			// Phones have no sidebar: the other pages are here.
 			card(c, func() {
@@ -200,9 +202,10 @@ func (a *App) settingsPage(c *ui.Context) {
 		section(c, i18n.T("settings.about"), func() {
 			ui.Text(c, "Colaunch "+appVersion()).Bold()
 			ui.Text(c, i18n.T("settings.about_text")).FontSize(13).TextColor(t.TextMuted)
+			a.updateAbout(c)
 			ui.Row(c).Gap(8).Wrap().Children(func() {
-				if isDesktop() && labeledButton(c, iconRefresh, i18n.T("settings.check_updates"), false).Clicked() {
-					updater.CheckForUpdates()
+				if labeledButton(c, iconRefresh, i18n.T("settings.check_updates"), false).Disabled(a.update.checking).Clicked() {
+					a.checkUpdates(true)
 				}
 				if labeledButton(c, iconExternal, "GitHub", false).Clicked() {
 					openURL("https://github.com/VOfficial404/colaunch")

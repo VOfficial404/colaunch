@@ -34,6 +34,8 @@ type Settings struct {
 	Theme string `json:"theme"`
 	// Background is enabled by default, including for settings saved before it existed.
 	Background *bool `json:"background,omitempty"`
+	// AutoUpdateCheck checks for updates in the background; nil is on.
+	AutoUpdateCheck *bool `json:"auto_update_check,omitempty"`
 	// OAuth is the client accounts sign in with.
 	OAuth google.Client `json:"oauth"`
 	// HFEndpoint is Hugging Face's address, for mirrors.
@@ -94,6 +96,11 @@ func (s Settings) MinRetry() float64 {
 
 func (s Settings) BackgroundEnabled() bool {
 	return s.Background == nil || *s.Background
+}
+
+// AutoUpdateChecks reports whether the app checks for updates by itself.
+func (s Settings) AutoUpdateChecks() bool {
+	return s.AutoUpdateCheck == nil || *s.AutoUpdateCheck
 }
 
 // DeployForm is what the Deploy page asks.
