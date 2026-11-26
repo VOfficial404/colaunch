@@ -27,6 +27,8 @@ type deployState struct {
 	// launched is the session the form last started, whose error shows
 	// under the form when llama.cpp refused its model.
 	launched string
+	// freeConfirm asks before a web task launches on the free tier.
+	freeConfirm bool
 }
 
 var variants = []string{"cpu", "gpu", "tpu"}
@@ -111,7 +113,7 @@ func (a *App) deployPage(c *ui.Context) {
 		})
 
 		section(c, i18n.T("deploy.hardware"), func() { a.hardware(c, acct) })
-		foldSection(c, "grab", i18n.T("deploy.grab"), grabSummary(d.form.Machine), &d.grabOpen, func() { a.grabForm(c) })
+		foldSection(c, "grab", i18n.T("deploy.grab"), grabSummary(d.form.Machine, a.m.Settings.MinRetry()), &d.grabOpen, func() { a.grabForm(c) })
 		foldSection(c, "guards", i18n.T("deploy.guards"), guardsLine(d.form.Guards), &d.guardsOpen, func() { a.guardsForm(c, &d.form.Guards, acct) })
 	}, func() { a.launchBar(c, acct) })
 }
@@ -124,17 +126,29 @@ func (a *App) launchBar(c *ui.Context, acct *core.Account) {
 	d.form.Variant = variants[d.variant]
 	summary := a.launchSummary(acct)
 	noCap := d.form.SpendCap <= 0
+	blocked, risky := a.freeWeb(acct)
 	button := func() {
-		b := labeledButton(c, iconRocket, i18n.T("deploy.launch"), true).Disabled(acct.SignedOut)
+		b := labeledButton(c, iconRocket, i18n.T("deploy.launch"), true).Disabled(acct.SignedOut || blocked)
 		if b.Clicked() {
-			a.launch()
+			if risky {
+				d.freeConfirm = true
+			} else {
+				a.launch()
+			}
 		}
 	}
 	capNote := func() {
+		if risky {
+			ui.Text(c, i18n.T("freeweb.on")).FontSize(12).Bold().TextColor(t.Danger).SingleLine()
+		}
 		if noCap {
 			ui.Text(c, i18n.T("bar.no_cap")).FontSize(12).Bold().TextColor(t.Warning).Tooltip(i18n.T("bar.no_cap_tip")).SingleLine()
 		}
 	}
+	if blocked {
+		a.freeWebNotice(c)
+	}
+	a.freeWebDialog(c)
 	if isPhone(c) {
 		ui.Text(c, summary).FontSize(12).TextColor(t.TextMuted)
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
@@ -178,7 +192,7 @@ func (a *App) launchSummary(acct *core.Account) string {
 	}
 	parts := []string{strings.Join(names, " → ")}
 	if m.Grab {
-		parts = append(parts, i18n.F("bar.grab_every", max(m.RetrySeconds, 10)))
+		parts = append(parts, i18n.F("bar.grab_every", max(m.RetrySeconds, a.m.Settings.MinRetry())))
 	} else {
 		parts = append(parts, i18n.T("bar.no_grab"))
 	}
@@ -432,22 +446,28 @@ func (a *App) grabForm(c *ui.Context) {
 	switchRow(c, &d.form.Grab, i18n.T("grab.on"))
 	ui.Text(c, i18n.T("grab.help")).FontSize(12).TextColor(t.TextMuted)
 	if d.form.Grab {
-		if d.form.RetrySeconds < 10 {
+		least := a.m.Settings.MinRetry()
+		if d.form.RetrySeconds < least {
 			d.form.RetrySeconds = 30
 		}
 		ui.Grid(c).Columns(formCols(c)).GapX(16).GapY(12).Children(func() {
-			ui.Field(c, i18n.T("grab.interval"), func() { ui.NumberInput(c, &d.form.RetrySeconds, 10, 3600, 5) })
+			ui.Column(c).Gap(4).Children(func() {
+				ui.Field(c, i18n.T("grab.interval"), func() { ui.NumberInput(c, &d.form.RetrySeconds, least, 3600, 1) })
+				if d.form.RetrySeconds < core.MinRetrySeconds {
+					riskyWarning(c, i18n.T("grab.too_fast"))
+				}
+			})
 			ui.Field(c, i18n.T("grab.max_wait"), func() { ui.NumberInput(c, &d.form.MaxWait, 0, 10080, 10) })
 		})
 	}
 }
 
 // grabSummary is how a machine is grabbed, in a line.
-func grabSummary(m core.Machine) string {
+func grabSummary(m core.Machine, least float64) string {
 	if !m.Grab {
 		return i18n.T("grab.s_off")
 	}
-	line := i18n.F("grab.s_on", max(m.RetrySeconds, 10))
+	line := i18n.F("grab.s_on", max(m.RetrySeconds, least))
 	if m.MaxWait > 0 {
 		return line + " · " + i18n.F("grab.s_max", duration(minutes(m.MaxWait)))
 	}

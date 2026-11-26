@@ -64,6 +64,10 @@ Any OpenAI client works: set its base URL to `http://127.0.0.1:8080/v1`.
 
 For images and videos, select **Images and videos (ComfyUI)** on **Deploy** and enter a diffusion GGUF repository, such as `abenzerps/Qwen-Image-2.1-Turbo-Quantized`. Use **Create** on the running session or **Open** beside its ComfyUI address. Colab may terminate free managed runtimes used primarily through a web UI for content generation, and it prohibits deepfakes on all managed runtimes. [Setup, workflows and GPU guidance](docs/comfyui.md)
 
+## Risky features
+
+**Settings → Risky features** has three switches, all off by default: public links to a runtime's web pages and APIs through a Cloudflare quick tunnel, grabbing as often as every 3 seconds, and deploying web tasks such as ComfyUI on Colab's free tier. None of them gets around Colab's rules, but each makes it likelier that Colab ends a runtime or restricts the account, at your own risk. Turning one on asks first. [What each does and how to turn it off](docs/risky.md)
+
 ## Background operation
 
 Enabled by default. You can turn it off in **Settings → Background operation**.

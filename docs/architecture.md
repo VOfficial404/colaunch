@@ -64,6 +64,18 @@ unassign the runtime, at `http://$TBE_RUNTIME_ADDR/unassign`, as
 `google.colab.runtime.unassign()` does. With the app open, Colaunch also
 checks the balance every minute and stops the runtime itself.
 
+## Public links
+
+With **Settings → Risky features → Public links** on, a port can be made
+public: `agent.py run share-<port>` runs `share.sh` as a plugin, its pid
+and log in the plugin's private folder. The script downloads cloudflared's
+latest Linux amd64 release, checked against the asset's `digest` in
+GitHub's API, and runs `cloudflared tunnel --no-autoupdate --url
+http://127.0.0.1:<port>`. The app reads the
+`https://….trycloudflare.com` address from the log. Links live only in
+memory: stopping the session closes them, and reconnecting after a restart
+closes any left running.
+
 ## State
 
 `settings.json` and `state.json` (accounts, and sessions with their

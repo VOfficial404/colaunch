@@ -2,7 +2,7 @@
   "name": "Colaunch",
   "slug": "colaunch",
   "identifier": "io.github.vofficial404.colaunch",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "copyright": "© 2026 VOfficial404",
   "license": "MIT",
   "out": "build",

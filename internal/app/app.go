@@ -60,6 +60,7 @@ type App struct {
 	ports    portsState
 	accounts accountsState
 	settings settingsState
+	risky    riskyState
 	tasks    tasksState
 	// details are the errors whose details are open, by notice.
 	details map[string]bool
@@ -522,17 +523,9 @@ func (a *App) undoable(title string, hide, restore, do func()) {
 	})
 }
 
-// isFreeTier reports whether Colab gives the account only its free tier.
-func isFreeTier(acct *core.Account) bool {
-	if acct == nil || acct.Quota == nil {
-		return false
-	}
-	switch acct.Quota.Tier {
-	case "NONE", "FREE":
-		return true
-	}
-	return false
-}
+// isFreeTier reports whether Colab gives the account only its free tier:
+// no subscription, or no compute units left.
+func isFreeTier(acct *core.Account) bool { return acct.FreeTier() }
 
 const colabFAQ = "https://research.google.com/colaboratory/faq.html#disallowed-activities"
 

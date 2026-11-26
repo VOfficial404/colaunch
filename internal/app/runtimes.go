@@ -22,6 +22,12 @@ type runtimesState struct {
 	editGuards map[string]*core.Guards
 	release    *core.UnmanagedRuntime
 	confirmRel bool
+	// shareConfirm asks before the port sharePort, named shareName, of
+	// the session shareSession goes public.
+	shareConfirm bool
+	shareSession string
+	sharePort    int
+	shareName    string
 	// machines are what the sessions launched from here asked for, to
 	// show the queue of accelerators while grabbing.
 	machines map[string]core.Machine
@@ -190,6 +196,7 @@ func (a *App) runtimesPage(c *ui.Context) {
 			r.toStop = nil
 		}
 	}
+	a.shareDialog(c)
 	if r.confirmRel && r.release != nil {
 		switch dangerConfirm(c, &r.confirmRel, i18n.T("stop.run_title"), i18n.F("stop.run_text", r.release.Runtime.Spec.String()), i18n.T("cancel"), i18n.T("stop.run_confirm")) {
 		case 1:
@@ -210,10 +217,14 @@ func (a *App) sessionCard(c *ui.Context, s *core.Session) {
 		if isPhone(c) {
 			// The badge on a line of its own leaves the title its width.
 			ui.Text(c, shortTitle(s)).FontSize(16).Bold().SingleLine().Ellipsis("…")
-			ui.Row(c).Children(func() { phaseBadge(c, s) })
+			ui.Row(c).Gap(6).Children(func() {
+				phaseBadge(c, s)
+				publicBadge(c, s)
+			})
 		} else {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, shortTitle(s)).FontSize(16).Bold().Grow(1).Shrink(1).SingleLine().Ellipsis("…").Tooltip(s.Title())
+				publicBadge(c, s)
 				phaseBadge(c, s)
 			})
 		}
@@ -291,7 +302,18 @@ func (a *App) sessionCard(c *ui.Context, s *core.Session) {
 	})
 	if waiting {
 		el.Border(1, waitColor(t))
+	} else if s.HasPublicLink() {
+		el.Border(1, t.Danger)
 	}
+}
+
+// publicBadge marks a session with a port public on the internet.
+func publicBadge(c *ui.Context, s *core.Session) {
+	if !s.HasPublicLink() {
+		return
+	}
+	t := c.Theme()
+	ui.Text(c, i18n.T("share.badge")).FontSize(12).Bold().TextColor(t.Danger).Padding(2, 8).Radius(999).Border(1, t.Danger).SingleLine().Tooltip(i18n.T("share.public"))
 }
 
 // waitPanel shows a session waiting for a runtime: when the next round
@@ -409,6 +431,7 @@ func (a *App) endpoints(c *ui.Context, s *core.Session) {
 						openURL(f.URL())
 					}
 				})
+				ui.Column(c.Key(f)).Children(func() { a.publicLink(c, s, f) })
 			case plugins.PortWeb, plugins.PortComfy:
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					a.copyable(c, f.Port.Name, f.URL())
@@ -416,6 +439,7 @@ func (a *App) endpoints(c *ui.Context, s *core.Session) {
 				if labeledButton(c, iconExternal, i18n.T("open"), false).Clicked() {
 					openURL(f.URL())
 				}
+				ui.Column(c.Key(f)).Children(func() { a.publicLink(c, s, f) })
 			default:
 				a.copyable(c, f.Port.Name, f.Address())
 			}

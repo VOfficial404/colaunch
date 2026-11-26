@@ -47,7 +47,11 @@ func newTestApp(t *testing.T) *App {
 	run.Created, run.StartBalance = time.Now().Add(-47*time.Minute), 96.7
 	run.GPUName, run.VRAM = "NVIDIA A100-SXM4-80GB", 81920
 	run.Guards = core.Guards{StopAfter: 240, IdleStop: 30, SpendCap: 20}
-	run.Result = &plugins.Result{Model: "Qwen3-32B", Info: [][2]string{{"quant", "Q8_0"}, {"size", "34.8 GB"}, {"context", "16384"}}}
+	run.Result = &plugins.Result{Model: "Qwen3-32B", APIKey: "sk-colaunch-test", Info: [][2]string{{"quant", "Q8_0"}, {"size", "34.8 GB"}, {"context", "16384"}}}
+	// Its API is public, as the risky features allow.
+	run.Forwards = []*core.ForwardState{{Port: plugins.Port{Name: "llama-server", Remote: plugins.LlamaPort, Local: 8080, Kind: plugins.PortOpenAI, Path: "/"}}}
+	run.Public = map[int]*core.PublicLink{plugins.LlamaPort: {Remote: plugins.LlamaPort, URL: "https://seasonal-deck-organisms-sf.trycloudflare.com"}}
+	m.Settings.Risky.PublicLinks = true
 	st := &agent.Status{CPUs: 12}
 	st.GPUs = append(st.GPUs, struct {
 		Name        string `json:"name"`

@@ -58,6 +58,9 @@ type Session struct {
 	TryErr    string
 	Grabbing  bool
 	StoppedAt time.Time
+	// Public are the ports reachable from the internet, by remote port;
+	// never saved.
+	Public map[int]*PublicLink
 
 	// sentWD is the watchdog the runtime was last given, nil for none
 	// known; main thread.
@@ -262,6 +265,10 @@ func (m *Manager) Launch(form DeployForm) (*Session, error) {
 	if p == nil {
 		return nil, fmt.Errorf("no plugin %q", form.Plugin)
 	}
+	if WebTask(p) && a.FreeTier() && !m.Settings.Risky.FreeWebUI {
+		return nil, ErrFreeWebUI
+	}
+	machine := m.grabMachine(form.Machine)
 	values := map[string]string{}
 	for k, v := range plugins.Defaults(p) {
 		values[k] = v
@@ -287,10 +294,10 @@ func (m *Manager) Launch(form DeployForm) (*Session, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	s.cancel = cancel
 	m.Sessions = append(m.Sessions, s)
-	s.Grabbing = form.Machine.Grab
+	s.Grabbing = machine.Grab
 	// The active account only: Colab's terms forbid using several to get
 	// around its limits; there is no option to.
-	go m.launch(ctx, s, a, p, form.Machine, m.Settings.MaxAttempts)
+	go m.launch(ctx, s, a, p, machine, m.Settings.MaxAttempts)
 	return s, nil
 }
 
@@ -637,7 +644,11 @@ func (m *Manager) Stop(s *Session, reason string) {
 	}
 	id := s.rid
 	s.mu.Unlock()
+	shares := s.dropPublicLinks()
 	go func() {
+		// Should giving the runtime back fail, no tunnel stays open
+		// that the view no longer shows.
+		s.closeShares(shares)
 		s.closeConns()
 		var err error
 		if id != "" && a != nil {
@@ -906,6 +917,7 @@ func (m *Manager) gone(s *Session) {
 		s.Phase = PhaseStopped
 		s.StoppedAt = time.Now()
 		s.StopReason = "gone"
+		s.dropPublicLinks()
 		byRuntime := false
 		if st := s.Status; st != nil && st.Stopped != nil {
 			s.StopReason = st.Stopped.Reason
@@ -937,10 +949,17 @@ func (m *Manager) reattach(s *Session, a *Account) {
 		m.Post(func() { s.Phase = PhaseRunning; s.Err = errText(err) })
 		return
 	}
-	_, st, err := m.connect(ctx, s, rt.Connection)
+	sh, st, err := m.connect(ctx, s, rt.Connection)
 	if err != nil {
 		m.Post(func() { s.Phase = PhaseRunning; s.Err = errText(err) })
 		return
+	}
+	// Public links aren't kept: close those the app had before it
+	// restarted, which it no longer shows.
+	for _, id := range leftShares(st) {
+		if err := agent.StopPlugin(ctx, sh, id); err == nil {
+			m.logf(s, "Closed a public link left from before the restart (%s).", id)
+		}
 	}
 	var ports, extra []plugins.Port
 	done := make(chan struct{})

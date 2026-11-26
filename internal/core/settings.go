@@ -52,6 +52,40 @@ type Settings struct {
 	Deploy DeployForm `json:"deploy"`
 	// Notifications are where notices go; their secrets are in Secrets.
 	Notifications Notifications `json:"notifications"`
+	// Risky are features that make Colab likelier to end runtimes or
+	// restrict the account; all off, as in settings saved before them.
+	Risky Risky `json:"risky"`
+}
+
+// Risky are the features the settings' "Risky features" turn on. None
+// breaks Colab's rules by itself, but each makes it likelier that Colab
+// ends a runtime or restricts the account (docs/risky.md).
+type Risky struct {
+	// PublicLinks lets a runtime's web, OpenAI and ComfyUI ports be
+	// reached from the internet, through a Cloudflare quick tunnel.
+	PublicLinks bool `json:"public_links"`
+	// FastGrab lowers the least wait between rounds of grabbing from
+	// MinRetrySeconds to FastRetrySeconds.
+	FastGrab bool `json:"fast_grab"`
+	// FreeWebUI lets an account on the free tier deploy tasks used
+	// through a web page, as ComfyUI.
+	FreeWebUI bool `json:"free_web_ui"`
+}
+
+// The least wait between rounds of grabbing, in seconds: normally, and
+// with Risky.FastGrab.
+const (
+	MinRetrySeconds  = 10
+	FastRetrySeconds = 3
+)
+
+// MinRetry is the least wait between rounds of grabbing the settings
+// allow, in seconds.
+func (s Settings) MinRetry() float64 {
+	if s.Risky.FastGrab {
+		return FastRetrySeconds
+	}
+	return MinRetrySeconds
 }
 
 func (s Settings) BackgroundEnabled() bool {

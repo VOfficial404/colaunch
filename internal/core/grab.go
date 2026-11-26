@@ -48,7 +48,9 @@ type grabbed struct {
 func (m *Manager) grab(ctx context.Context, s *Session, machine Machine, vramTries int,
 	try func(spec colab.Spec) error) (grabbed, error) {
 	start := time.Now()
-	interval := time.Duration(max(machine.RetrySeconds, 10) * float64(time.Second))
+	// Launch raised RetrySeconds to what the settings allow; never less
+	// than the fastest they may.
+	interval := time.Duration(max(machine.RetrySeconds, FastRetrySeconds) * float64(time.Second))
 	attempt, vramMisses := 0, 0
 	for round := 1; ; round++ {
 		var last error

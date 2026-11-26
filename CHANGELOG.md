@@ -2,6 +2,14 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.6]
+
+Risky features, under **Settings → Risky features**, all off by default. Each asks before it turns on, and says what it risks: Colab may end runtimes or restrict the account. [docs/risky.md](docs/risky.md)
+- Public links: make a runtime's web, OpenAI or ComfyUI port reachable from the internet through a Cloudflare quick tunnel. Each link asks first and shows "Public on the internet" while it's open. cloudflared is downloaded on the runtime and checked against the SHA-256 GitHub publishes for it. An OpenAI API needs an API key before it can be made public. Links close when the runtime stops, and aren't kept across restarts.
+- Aggressive grabbing: rounds of grabbing as often as every 3 seconds, instead of 10.
+- Web tasks on the free tier: accounts without paid compute units can deploy tasks used through a web page, such as ComfyUI, after confirming each launch.
+- Accounts on the free tier, or with no compute units left, can no longer deploy ComfyUI and other web tasks unless that setting is on. Colab's FAQ disallows using free runtimes mainly through a web interface.
+
 ## [0.1.5]
 
 - Deploy text-to-image and text-to-video GGUFs with the built-in ComfyUI task. It chooses a quantization for the assigned GPU, downloads the companion files and prepares a workflow for the ComfyUI web interface.
