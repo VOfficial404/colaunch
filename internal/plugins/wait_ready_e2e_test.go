@@ -177,9 +177,18 @@ func TestWaitReadyOverCommandTerminal(t *testing.T) {
 	conn := e2e.Colab(t, func(n int) e2e.Faults {
 		opened.Store(int32(n))
 		if n == 1 {
+			droppedEnd := false
 			return e2e.Faults{Line: func(line string) (string, bool) {
-				if strings.HasPrefix(strings.TrimSpace(line), "@@START-") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "@@START-") {
 					return "", true
+				}
+				if strings.HasPrefix(line, "@@END-") && !droppedEnd {
+					droppedEnd = true
+					return "", true
+				}
+				if strings.HasPrefix(line, "@@WR ") {
+					return line + "\nstray output after the reply", true
 				}
 				return line, true
 			}}
@@ -206,9 +215,9 @@ func TestWaitReadyOverCommandTerminal(t *testing.T) {
 	if err := os.WriteFile(dir+"/log.txt", []byte(log.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldBudget, oldPoll := waitMonitorBudget, waitPollInterval
-	waitMonitorBudget, waitPollInterval = 2*time.Second, 100*time.Millisecond
-	t.Cleanup(func() { waitMonitorBudget, waitPollInterval = oldBudget, oldPoll })
+	oldBudget, oldPoll, oldShellCheck := waitMonitorBudget, waitPollInterval, waitShellCheck
+	waitMonitorBudget, waitPollInterval, waitShellCheck = 2*time.Second, 100*time.Millisecond, 2*time.Second
+	t.Cleanup(func() { waitMonitorBudget, waitPollInterval, waitShellCheck = oldBudget, oldPoll, oldShellCheck })
 	var logs []string
 	env := &Env{
 		Shell: sh,

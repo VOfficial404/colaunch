@@ -35,7 +35,7 @@ failed runtimes.
 ## The terminal as a transport
 
 Colab's proxy serves the runtime's Jupyter server and a terminal, both
-behind its token. Colaunch uses only the terminal:
+behind its token. Colaunch runs deployment commands over the terminal:
 
 - **Commands** run in a bash without readline, whose terminal echoes
   nothing. Each prints markers around its output, typed with an empty pair
@@ -59,11 +59,18 @@ behind its token. Colaunch uses only the terminal:
   confirmed. The installer keeps running during reconnects. If the monitor
   cannot connect within 15 seconds, Colaunch tries a read-only probe over
   the existing control terminal. Each poll pipes one request to
-  `agent.py wait-ready`, which answers and exits. A reply is usable after
-  a missing START marker if END arrives and the reply's nonce, checksum,
-  and log range match the request. A stream's unique ready marker can
-  follow leftover output on the same line. The quoted marker in the
-  echoed command ends with a quote and cannot complete the handshake.
+  `agent.py wait-ready`, which answers and exits. Colaunch can recover a
+  complete reply after a lost START or END marker by checking the nonce,
+  checksum, and log range. A stream's unique ready marker can follow
+  leftover output on the same line. The quoted marker in the echoed
+  command ends with a quote and cannot complete the handshake.
+
+- **Reading logs** can use the runtime's HTTPS Jupyter Contents API.
+  Colaunch requests only the plugin's log path and falls back to the shell
+  for manual log reads if the API cannot serve the file. After a monitoring
+  failure, it gives the file API up to three seconds to recover the last
+  24 lines before applying the normal runtime release policy. This depends
+  on the runtime exposing `/content` as the Contents root.
 
 ## The watchdog
 

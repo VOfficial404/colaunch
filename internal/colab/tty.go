@@ -27,9 +27,23 @@ import (
 type TTY struct {
 	ws   *websocket.Conn
 	r    *io.PipeReader
-	wmu  sync.Mutex
+	wmu  chan struct{}
 	done chan struct{}
 	once sync.Once
+}
+
+// lockTerminal serializes terminal commands and writes within their deadlines.
+func lockTerminal(ctx context.Context, gate chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case gate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-gate
+			return err
+		}
+		return nil
+	}
 }
 
 // DialTTY opens a terminal on the runtime.
@@ -39,13 +53,16 @@ func DialTTY(ctx context.Context, conn *Connection) (*TTY, error) {
 	h := http.Header{}
 	h.Set(proxyTokenHeader, conn.Token)
 	h.Set(clientAgentHeader, ClientAgent)
-	ws, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: h})
+	ws, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: h})
 	if err != nil {
+		if resp != nil && resp.StatusCode >= 400 && resp.StatusCode <= 599 {
+			return nil, fmt.Errorf("colab: terminal: %w", &APIError{Status: resp.StatusCode, Message: http.StatusText(resp.StatusCode)})
+		}
 		return nil, fmt.Errorf("colab: terminal: %w", err)
 	}
 	ws.SetReadLimit(16 << 20)
 	pr, pw := io.Pipe()
-	t := &TTY{ws: ws, r: pr, done: make(chan struct{})}
+	t := &TTY{ws: ws, r: pr, wmu: make(chan struct{}, 1), done: make(chan struct{})}
 	go t.readLoop(pw)
 	go t.pingLoop()
 	t.resize(ctx, 200, 50)
@@ -101,8 +118,10 @@ func (t *TTY) WriteString(s string) error {
 
 // WriteStringContext types s into the terminal within ctx's deadline.
 func (t *TTY) WriteStringContext(ctx context.Context, s string) error {
-	t.wmu.Lock()
-	defer t.wmu.Unlock()
+	if err := lockTerminal(ctx, t.wmu); err != nil {
+		return err
+	}
+	defer func() { <-t.wmu }()
 	// Small messages: proxies limit what they read at once, Colab's too
 	// perhaps, and 32 KiB is a common limit.
 	const chunk = 8 << 10
@@ -130,10 +149,12 @@ func (t *TTY) Resize(cols, rows int) {
 
 func (t *TTY) resize(ctx context.Context, cols, rows int) {
 	b, _ := json.Marshal(map[string]int{"cols": cols, "rows": rows})
-	t.wmu.Lock()
-	defer t.wmu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	if lockTerminal(ctx, t.wmu) != nil {
+		return
+	}
+	defer func() { <-t.wmu }()
 	t.ws.Write(ctx, websocket.MessageText, b)
 }
 
@@ -156,7 +177,7 @@ func (t *TTY) Close() error {
 // terminal echoing the command doesn't print them.
 type Shell struct {
 	tty *TTY
-	mu  sync.Mutex // one command at a time
+	mu  chan struct{} // one command at a time
 	n   int
 	// tmp is a folder of the shell's own on the runtime, made on first
 	// use, for commands too long for a line.
@@ -212,7 +233,7 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 }
 
 func newShell(tty *TTY) *Shell {
-	s := &Shell{tty: tty, tmp: "/tmp/.colaunch-" + randHex(8)}
+	s := &Shell{tty: tty, mu: make(chan struct{}, 1), tmp: "/tmp/.colaunch-" + randHex(8)}
 	s.cond = sync.NewCond(&s.bmu)
 	return s
 }
@@ -293,13 +314,18 @@ func (s *Shell) find(marker []byte, code bool) (start, end, status int) {
 // "@@" after it), and returns what it printed before, and the digits.
 // What it printed up to the marker's end is dropped.
 func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int, error) {
+	return s.waitReply(ctx, marker, code, "")
+}
+
+func (s *Shell) waitReply(ctx context.Context, marker string, code bool, prefix string) ([]byte, int, error) {
 	stop := context.AfterFunc(ctx, func() {
 		s.bmu.Lock()
 		s.cond.Broadcast()
 		s.bmu.Unlock()
 	})
 	defer stop()
-	m := []byte(marker)
+	m, p := []byte(marker), []byte(prefix)
+	frameScan := 0
 	s.bmu.Lock()
 	defer s.bmu.Unlock()
 	for {
@@ -309,8 +335,23 @@ func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int
 			s.scan = 0
 			return before, status, nil
 		}
+		if len(p) > 0 {
+			data := s.buf.Bytes()
+			if i := bytes.Index(data[frameScan:], p); i >= 0 {
+				frameScan += i
+				if end := bytes.IndexByte(data[frameScan+len(p):], '\n'); end >= 0 {
+					end += frameScan + len(p) + 1
+					frame := bytes.Clone(data[frameScan:end])
+					s.buf.Next(end)
+					s.scan = 0
+					return frame, -1, nil
+				}
+			} else {
+				frameScan = max(frameScan, len(data)-len(p)+1)
+			}
+		}
 		if s.err != nil {
-			return nil, -1, fmt.Errorf("colab: the terminal closed: %w", s.err)
+			return nil, -1, fmt.Errorf("%w: %w", ErrTerminalClosed, s.err)
 		}
 		if ctx.Err() != nil {
 			return nil, -1, ctx.Err()
@@ -318,6 +359,12 @@ func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int
 		s.cond.Wait()
 	}
 }
+
+// Errors identifying a closed terminal and a command that never signaled readiness.
+var (
+	ErrTerminalClosed   = errors.New("colab: the terminal closed")
+	ErrTerminalNotReady = errors.New("colab: the terminal command didn't start")
+)
 
 // ErrMissingStart means Run consumed the command's complete END marker,
 // but its output had no complete START marker.
@@ -337,16 +384,18 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	return s.run(ctx, cmd, "")
 }
 
-// RunFramed also returns output if START was lost but a complete END was
-// received and the output contains the caller's unique response prefix.
-// The caller must validate its frame before using it.
+// RunFramed runs a read-only command whose reply contains a unique prefix.
+// It can return a complete line before END arrives, with status -1. The
+// caller must validate its frame before using it.
 func (s *Shell) RunFramed(ctx context.Context, cmd, prefix string) (string, int, error) {
 	return s.run(ctx, cmd, prefix)
 }
 
 func (s *Shell) run(ctx context.Context, cmd, prefix string) (string, int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := lockTerminal(ctx, s.mu); err != nil {
+		return "", -1, err
+	}
+	defer func() { <-s.mu }()
 	s.n++
 	n := s.n
 	enc := base64.StdEncoding.EncodeToString([]byte(cmd))
@@ -366,25 +415,29 @@ func (s *Shell) run(ctx context.Context, cmd, prefix string) (string, int, error
 	if err := s.tty.WriteStringContext(ctx, line); err != nil {
 		return "", -1, err
 	}
-	before, code, err := s.wait(ctx, fmt.Sprintf("@@END-%d:", n), true)
+	before, code, err := s.waitReply(ctx, fmt.Sprintf("@@END-%d:", n), true, prefix)
 	if err != nil {
 		return "", -1, err
 	}
-	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
-	i := bytes.LastIndex(before, startMark)
-	if i < 0 {
-		if prefix != "" && bytes.Count(before, []byte(prefix)) == 1 {
-			return string(before), code, nil
-		}
-		return "", -1, missingStartError(n)
+	if code < 0 {
+		return string(before), code, nil
 	}
-	return string(before[i+len(startMark):]), code, nil
+	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
+	if i := bytes.LastIndex(before, startMark); i >= 0 {
+		return string(before[i+len(startMark):]), code, nil
+	}
+	if prefix != "" && bytes.Count(before, []byte(prefix)) == 1 {
+		return string(before), code, nil
+	}
+	return "", -1, missingStartError(n)
 }
 
 // Upload writes data to path on the runtime, making its directory.
 func (s *Shell) Upload(ctx context.Context, path string, data []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := lockTerminal(ctx, s.mu); err != nil {
+		return err
+	}
+	defer func() { <-s.mu }()
 	s.n++
 	return s.upload(ctx, path, data, false)
 }
@@ -487,14 +540,14 @@ func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY,
 	case err := <-found:
 		if err != nil {
 			tty.Close()
-			return nil, nil, fmt.Errorf("colab: the terminal command ended before it was ready: %w", err)
+			return nil, nil, fmt.Errorf("colab: the terminal command ended before it was ready: %w: %w", ErrTerminalClosed, err)
 		}
 	case <-ctx.Done():
 		tty.Close()
 		return nil, nil, ctx.Err()
 	case <-time.After(45 * time.Second):
 		tty.Close()
-		return nil, nil, errors.New("colab: the terminal command didn't start")
+		return nil, nil, ErrTerminalNotReady
 	}
 	return tty, r, nil
 }

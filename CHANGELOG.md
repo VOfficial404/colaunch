@@ -2,6 +2,11 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.14]
+
+- Preserve diagnostics from both the deployment monitor and the control terminal when neither can report a plugin’s status.
+- Try to recover the installer’s log through the runtime’s file API if terminal connections fail, including before returning a failed runtime to Colab.
+
 ## [0.1.13]
 
 - If the dedicated deployment monitor cannot connect within 15 seconds, try reading status over the existing control terminal. Continue from the last confirmed log position on the same runtime and suppress repeated connection notices.

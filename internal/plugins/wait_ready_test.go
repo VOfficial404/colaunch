@@ -295,7 +295,10 @@ func TestWaitReadyGivesUp(t *testing.T) {
 		scripts = append(scripts, bad)
 	}
 	env, reqs, conns := monitorEnv(t, id, scripts...)
-	if err := waitReady(ctx, env, id, 90*time.Minute, check); !errors.Is(err, errBadAnswer) || err.Error() != "invalid readiness probe response" {
+	err := waitReady(ctx, env, id, 90*time.Minute, check)
+	var werr *WaitError
+	if !errors.As(err, &werr) || !errors.Is(err, errBadAnswer) ||
+		!strings.HasPrefix(err.Error(), "opening a terminal to wait on: invalid readiness probe response (") {
 		t.Fatalf("waitReady error = %v", err)
 	}
 	if conns.Load() != waitMaxFails || len(reqs()) != waitMaxFails*waitMaxMisses {
@@ -305,9 +308,10 @@ func TestWaitReadyGivesUp(t *testing.T) {
 	var dials int
 	env.Stream = func(context.Context, string, string) (StreamConn, *bufio.Reader, error) {
 		dials++
-		return nil, nil, errors.New("colab: terminal: 502")
+		return nil, nil, fmt.Errorf("colab: terminal: %w", &colab.APIError{Status: 502, Message: "Bad Gateway"})
 	}
-	if err := waitReady(ctx, env, id, 90*time.Minute, check); err == nil || !strings.Contains(err.Error(), "502") || dials != waitMaxFails {
+	if err := waitReady(ctx, env, id, 90*time.Minute, check); !errors.As(err, &werr) ||
+		!strings.HasPrefix(err.Error(), "opening a terminal to wait on: HTTP 502 (") || dials != waitMaxFails {
 		t.Fatalf("waitReady error = %v after %d dials", err, dials)
 	}
 }

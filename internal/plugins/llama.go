@@ -284,7 +284,7 @@ func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
 }
 
 func (Llama) readyCheck() string {
-	return fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/health", LlamaPort)
+	return fmt.Sprintf("curl -sf --max-time 10 -o /dev/null http://127.0.0.1:%d/health", LlamaPort)
 }
 
 func (l Llama) Stop(ctx context.Context, sh *colab.Shell) error {

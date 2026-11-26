@@ -255,7 +255,7 @@ var waitProbeTimeout = 2 * time.Minute
 // terminal is there to fall back on. waitShellCheck bounds its first probe.
 var (
 	waitMonitorBudget = 15 * time.Second
-	waitShellCheck    = 5 * time.Second
+	waitShellCheck    = 20 * time.Second
 )
 
 // waitReadyCommand starts the agent's deployment monitor; tests replace it
@@ -389,23 +389,23 @@ func shellProbe(ctx context.Context, sh *colab.Shell, id string, off int64, chec
 	defer cancel()
 	head := "@@WR " + nonce + " "
 	out, code, err := sh.RunFramed(probeCtx, "printf '%s' "+ShellQuote(req)+" | "+command, head)
-	if err != nil {
-		if ctx.Err() != nil {
-			return waitAnswer{}, ctx.Err()
-		}
-		if probeCtx.Err() != nil {
-			return waitAnswer{}, errNoAnswer
-		}
-		return waitAnswer{}, err
-	}
-	if code != 0 {
-		return waitAnswer{}, fmt.Errorf("the readiness probe exited with status %d", code)
+	if err == nil && code > 0 {
+		return waitAnswer{}, waitProbeExit(code)
 	}
 	if strings.Count(out, head) == 1 {
-		_, payload, _ := strings.Cut(out, head)
-		if a, ok := parseWaitAnswer(payload, off); ok {
-			return a, nil
+		_, rest, _ := strings.Cut(out, head)
+		if line, _, complete := strings.Cut(rest, "\n"); complete {
+			if a, ok := parseWaitAnswer(line, off); ok {
+				return a, nil
+			}
 		}
+		return waitAnswer{}, errBadAnswer
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return waitAnswer{}, errNoAnswer
+	}
+	if err != nil {
+		return waitAnswer{}, err
 	}
 	return waitAnswer{}, errBadAnswer
 }
@@ -423,7 +423,7 @@ func (m *waitMonitor) probe(ctx context.Context, off int64, check string) (waitA
 		select {
 		case line, ok := <-m.lines:
 			if !ok {
-				return waitAnswer{}, fmt.Errorf("colab: the terminal closed: %w", m.err)
+				return waitAnswer{}, fmt.Errorf("%w: %w", colab.ErrTerminalClosed, m.err)
 			}
 			i := strings.LastIndex(line, head)
 			if i < 0 {
@@ -442,6 +442,59 @@ func (m *waitMonitor) probe(ctx context.Context, off int64, check string) (waitA
 	}
 }
 
+type waitProbeExit int
+
+func (code waitProbeExit) Error() string {
+	return fmt.Sprintf("the readiness probe exited with status %d", code)
+}
+
+// WaitError is waitReady giving up on the terminals it reads the plugin's
+// status over: the plugin may still be running. Err is the last failure,
+// already reduced by waitTransportError; Monitor and Shell are the last
+// outcome on each terminal. Its text keeps the "opening a terminal to
+// wait on: " prefix that callers classify by.
+type WaitError struct {
+	Err            error
+	Monitor, Shell string
+	Elapsed        time.Duration
+}
+
+func (e *WaitError) Error() string {
+	return fmt.Sprintf("opening a terminal to wait on: %v (monitor terminal: %s, command terminal: %s, elapsed: %s)",
+		e.Err, e.Monitor, e.Shell, e.Elapsed.Round(time.Millisecond))
+}
+
+func (e *WaitError) Unwrap() error { return e.Err }
+
+// waitTransportError reports only evidence from recognized errors. Transport
+// errors can contain proxy URLs, response bodies, or terminal text.
+func waitTransportError(err error) error {
+	var api *colab.APIError
+	var exit waitProbeExit
+	switch {
+	case errors.Is(err, errBadAnswer):
+		return errBadAnswer
+	case errors.Is(err, errNoAnswer):
+		return errNoAnswer
+	case errors.As(err, &exit):
+		return exit
+	case errors.As(err, &api) && api.Status >= 100 && api.Status <= 599:
+		return fmt.Errorf("HTTP %d", api.Status)
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, colab.ErrTerminalClosed):
+		return colab.ErrTerminalClosed
+	case errors.Is(err, colab.ErrTerminalNotReady):
+		return colab.ErrTerminalNotReady
+	case errors.Is(err, colab.ErrMissingStart):
+		return colab.ErrMissingStart
+	default:
+		return errors.New("terminal transport failed")
+	}
+}
+
 // waitReady polls check every few seconds until it's true, the plugin's
 // process ends, or ctx is done. Each poll shows the log's new lines.
 //
@@ -455,6 +508,7 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 	if env.Stream == nil {
 		return errors.New("plugins: no terminal to wait for the plugin on")
 	}
+	start := time.Now()
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var mon *waitMonitor
@@ -475,15 +529,13 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			lastConnectionNote = note
 		}
 	}
-	// The command terminal is fallen back on while it runs commands; once
-	// it fails, only monitors are tried, each given the full time.
+	lastMonitor, lastShell := "not tried", "not tried"
+	finish := func(err error) error {
+		return &WaitError{Err: err, Monitor: lastMonitor, Shell: lastShell, Elapsed: time.Since(start)}
+	}
 	shell := env.Shell
-	if shell != nil {
-		select {
-		case <-shell.Done():
-			shell = nil
-		default:
-		}
+	if shell == nil {
+		lastShell = "unavailable"
 	}
 	viaShell, firstShellProbe := false, false
 	for probeCtx.Err() == nil {
@@ -497,11 +549,21 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			}
 			budget := waitReconnectTimeout
 			if shell != nil {
-				budget = waitMonitorBudget
+				select {
+				case <-shell.Done():
+					shell = nil
+					lastShell = "closed"
+				default:
+					budget = waitMonitorBudget
+				}
 			}
 			openCtx, openCancel := context.WithTimeout(probeCtx, budget)
 			m, err := openWaitMonitor(openCtx, env, id)
 			openCancel()
+			if err != nil {
+				err = waitTransportError(err)
+				lastMonitor = "open failed: " + err.Error()
+			}
 			if probeCtx.Err() != nil {
 				if m != nil {
 					m.close()
@@ -515,7 +577,7 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 					continue
 				}
 				if fails++; fails >= waitMaxFails {
-					return fmt.Errorf("opening a terminal to wait on: %w", err)
+					return finish(err)
 				}
 				logf("✗ %v", err)
 				continue
@@ -534,6 +596,14 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 		} else {
 			a, err = mon.probe(probeCtx, off, check)
 		}
+		if err != nil {
+			err = waitTransportError(err)
+			if viaShell {
+				lastShell = err.Error()
+			} else {
+				lastMonitor = err.Error()
+			}
+		}
 		if probeCtx.Err() != nil {
 			break
 		}
@@ -544,16 +614,23 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 				}
 			}
 			if viaShell {
-				viaShell, shell = false, nil
+				// A bad reply does not close the command terminal. Give the
+				// monitor another try before falling back to it again.
+				viaShell = false
 			} else {
 				mon.close()
 				mon = nil
 			}
 			if fails++; fails >= waitMaxFails {
-				return err
+				return finish(err)
 			}
 			logf("The terminal stopped answering (%v); opening another to read on.", err)
 			continue
+		}
+		if viaShell {
+			lastShell = "answered"
+		} else {
+			lastMonitor = "answered"
 		}
 		misses, fails = 0, 0
 		lastConnectionNote = ""
@@ -586,6 +663,7 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Running out of time is the plugin's failure, not the terminals'.
 	return fmt.Errorf("the plugin didn't get ready in %s", timeout)
 }
 

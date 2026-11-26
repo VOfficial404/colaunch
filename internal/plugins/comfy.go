@@ -367,7 +367,7 @@ func (c Comfy) Deploy(ctx context.Context, env *Env) (*Result, error) {
 }
 
 func (Comfy) readyCheck(port int) string {
-	return fmt.Sprintf("curl -sf -o /dev/null http://127.0.0.1:%d/system_stats", port)
+	return fmt.Sprintf("curl -sf --max-time 10 -o /dev/null http://127.0.0.1:%d/system_stats", port)
 }
 
 func (c Comfy) Stop(ctx context.Context, sh *colab.Shell) error {

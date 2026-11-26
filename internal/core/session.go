@@ -457,7 +457,7 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 	}
 	res, err := p.Deploy(ctx, env)
 	if err != nil {
-		m.fail(s, a, err)
+		m.failDeploy(ctx, s, a, err)
 		return
 	}
 	m.Post(func() { s.Result = res; m.saveState() })
@@ -1057,25 +1057,6 @@ func (m *Manager) reattach(s *Session, a *Account) {
 	m.forwardAll(s, ports, extra)
 	m.phase(s, PhaseRunning)
 	m.logf(s, "Reconnected to runtime %s.", id)
-}
-
-// Logs fetches the end of the session's plugin log from the runtime.
-func (m *Manager) Logs(s *Session, done func(string, error)) {
-	a := m.Account(s.Account)
-	if a == nil {
-		return
-	}
-	plugin := s.Plugin
-	go func() {
-		ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
-		defer cancel()
-		sh, err := m.shellOf(ctx, s, a)
-		var out string
-		if err == nil {
-			out, err = agent.Logs(ctx, sh, plugin, 300)
-		}
-		m.Post(func() { done(out, err) })
-	}()
 }
 
 // UpdateGuards changes a running session's limits, on the runtime too.

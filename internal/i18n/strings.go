@@ -94,7 +94,7 @@ var dict = map[string][3]string{
 	"err.not_llm_next": {"Select ‘Deploy as an image/video model’ below to open the ComfyUI task with this repository already filled in.", "点击下方的「改用生图/视频部署」，切换到 ComfyUI 任务并带入这个仓库。", "點選下方的「改用生圖/影片部署」，切換到 ComfyUI 任務並帶入這個儲存庫。"},
 
 	"err.monitor_connection":      {"Colaunch could not read deployment status", "Colaunch 无法读取部署状态", "Colaunch 無法讀取部署狀態"},
-	"err.monitor_connection_next": {"If the runtime is still active, open its log to see where the installation got to.", "如果运行时仍在，请打开「运行时上的日志」查看安装进度。", "如果執行階段仍在執行，請開啟「執行階段上的日誌」查看安裝進度。"},
+	"err.monitor_connection_next": {"Open the Colaunch log for connection details. If the runtime is still active, you can also read the log on the runtime.", "在「Colaunch 日志」查看连接详情。如果运行时仍在，也可以打开「运行时上的日志」。", "在「Colaunch 日誌」查看連線詳情。如果執行階段仍在，也可以開啟「執行階段上的日誌」。"},
 	"runtimes.remote_log_empty":   {"The runtime has no plugin log yet.", "运行时上暂时没有插件日志。", "執行階段上暫時沒有外掛日誌。"},
 
 	"err.only_safetensors":      {"This repository has safetensors weights but no GGUF files", "这个仓库有 safetensors 权重，缺少 GGUF 文件", "這個儲存庫有 safetensors 權重，缺少 GGUF 檔案"},
