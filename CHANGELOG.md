@@ -2,6 +2,13 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.13]
+
+- If the dedicated deployment monitor cannot connect within 15 seconds, try reading status over the existing control terminal. Continue from the last confirmed log position on the same runtime and suppress repeated connection notices.
+- Recognize the monitor's unique ready marker when it follows leftover terminal output on the same line.
+- Open the runtime’s own log while a plugin is still deploying.
+- Explain when a repository has safetensors weights, only a multimodal projector, or GGUF filenames without a recognized quantization.
+
 ## [0.1.12]
 
 - Read deployment status and logs through a dedicated runtime monitor. Each response includes a random request identifier and a checksum. If a response is incomplete, Colaunch retries from the last confirmed log position. New terminals use unique handshake markers to ignore stale output. The installer keeps running on the same runtime while the monitor reconnects.

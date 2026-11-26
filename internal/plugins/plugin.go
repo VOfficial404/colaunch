@@ -251,6 +251,17 @@ const (
 // it is given up for another.
 var waitProbeTimeout = 2 * time.Minute
 
+// waitMonitorBudget bounds opening a monitor terminal while the command
+// terminal is there to fall back on. waitShellCheck bounds its first probe.
+var (
+	waitMonitorBudget = 15 * time.Second
+	waitShellCheck    = 5 * time.Second
+)
+
+// waitReadyCommand starts the agent's deployment monitor; tests replace it
+// to run their own agent.
+var waitReadyCommand = agent.WaitReadyCommand
+
 // waitPollInterval is how long to wait between polls once the log is
 // read, and waitReopenDelay before opening a terminal after another
 // failed.
@@ -333,7 +344,7 @@ type waitMonitor struct {
 }
 
 func openWaitMonitor(ctx context.Context, env *Env, id string) (*waitMonitor, error) {
-	command, ready := agent.WaitReadyCommand(id, waitLogChunk, rand.Text())
+	command, ready := waitReadyCommand(id, waitLogChunk, rand.Text())
 	conn, r, err := env.Stream(ctx, command, ready)
 	if err != nil {
 		return nil, err
@@ -362,10 +373,46 @@ func (m *waitMonitor) close() {
 	m.conn.Close()
 }
 
+func probeRequest(off int64, check string) (nonce, req string) {
+	nonce = newProbeToken()
+	return nonce, fmt.Sprintf("W %s %d %s\n", nonce, off, base64.StdEncoding.EncodeToString([]byte(check)))
+}
+
+// shellProbe asks the same as a monitor's probe over the command terminal:
+// the agent answers the one request piped to it and exits. The command
+// terminal is the one the plugin was started on, so it reads while a
+// dedicated terminal can't be opened.
+func shellProbe(ctx context.Context, sh *colab.Shell, id string, off int64, check string) (waitAnswer, error) {
+	nonce, req := probeRequest(off, check)
+	command, _ := waitReadyCommand(id, waitLogChunk, rand.Text())
+	probeCtx, cancel := context.WithTimeout(ctx, waitProbeTimeout)
+	defer cancel()
+	head := "@@WR " + nonce + " "
+	out, code, err := sh.RunFramed(probeCtx, "printf '%s' "+ShellQuote(req)+" | "+command, head)
+	if err != nil {
+		if ctx.Err() != nil {
+			return waitAnswer{}, ctx.Err()
+		}
+		if probeCtx.Err() != nil {
+			return waitAnswer{}, errNoAnswer
+		}
+		return waitAnswer{}, err
+	}
+	if code != 0 {
+		return waitAnswer{}, fmt.Errorf("the readiness probe exited with status %d", code)
+	}
+	if strings.Count(out, head) == 1 {
+		_, payload, _ := strings.Cut(out, head)
+		if a, ok := parseWaitAnswer(payload, off); ok {
+			return a, nil
+		}
+	}
+	return waitAnswer{}, errBadAnswer
+}
+
 // probe asks whether the plugin is ready and, if not, for its log from off.
 func (m *waitMonitor) probe(ctx context.Context, off int64, check string) (waitAnswer, error) {
-	nonce := newProbeToken()
-	req := fmt.Sprintf("W %s %d %s\n", nonce, off, base64.StdEncoding.EncodeToString([]byte(check)))
+	nonce, req := probeRequest(off, check)
 	probeCtx, cancel := context.WithTimeout(ctx, waitProbeTimeout)
 	defer cancel()
 	if err := m.conn.WriteStringContext(probeCtx, req); err != nil {
@@ -401,7 +448,9 @@ func (m *waitMonitor) probe(ctx context.Context, off int64, check string) (waitA
 // The polls go to the agent on a terminal of its own (waitMonitor). A bad
 // answer is asked again from the last confirmed log offset; a terminal
 // that closes, doesn't answer, or keeps answering badly is replaced by
-// another on the same runtime, the plugin left running.
+// another on the same runtime, the plugin left running. A monitor that
+// can't be opened in waitMonitorBudget gives way to a bounded probe on
+// the command terminal. If it answers, the polls continue over it.
 func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check string) error {
 	if env.Stream == nil {
 		return errors.New("plugins: no terminal to wait for the plugin on")
@@ -418,13 +467,27 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 	var off int64
 	var carry []byte
 	var recent []string
+	var lastConnectionNote string
 	logf := func(format string, args ...any) {
-		if env.Log != nil {
-			env.Log(format, args...)
+		note := fmt.Sprintf(format, args...)
+		if env.Log != nil && note != lastConnectionNote {
+			env.Log("%s", note)
+			lastConnectionNote = note
 		}
 	}
+	// The command terminal is fallen back on while it runs commands; once
+	// it fails, only monitors are tried, each given the full time.
+	shell := env.Shell
+	if shell != nil {
+		select {
+		case <-shell.Done():
+			shell = nil
+		default:
+		}
+	}
+	viaShell, firstShellProbe := false, false
 	for probeCtx.Err() == nil {
-		if mon == nil {
+		if mon == nil && !viaShell {
 			if fails > 1 {
 				select {
 				case <-probeCtx.Done():
@@ -432,7 +495,11 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 				case <-time.After(waitReopenDelay):
 				}
 			}
-			openCtx, openCancel := context.WithTimeout(probeCtx, waitReconnectTimeout)
+			budget := waitReconnectTimeout
+			if shell != nil {
+				budget = waitMonitorBudget
+			}
+			openCtx, openCancel := context.WithTimeout(probeCtx, budget)
 			m, err := openWaitMonitor(openCtx, env, id)
 			openCancel()
 			if probeCtx.Err() != nil {
@@ -442,6 +509,11 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 				break
 			}
 			if err != nil {
+				if shell != nil {
+					logf("The monitor terminal didn't connect (%v); reading status over the command terminal.", err)
+					viaShell, firstShellProbe, misses = true, true, 0
+					continue
+				}
 				if fails++; fails >= waitMaxFails {
 					return fmt.Errorf("opening a terminal to wait on: %w", err)
 				}
@@ -450,7 +522,18 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			}
 			mon, misses = m, 0
 		}
-		a, err := mon.probe(probeCtx, off, check)
+		var a waitAnswer
+		var err error
+		if firstShellProbe {
+			firstShellProbe = false
+			firstCtx, firstCancel := context.WithTimeout(probeCtx, waitShellCheck)
+			a, err = shellProbe(firstCtx, shell, id, off, check)
+			firstCancel()
+		} else if viaShell {
+			a, err = shellProbe(probeCtx, shell, id, off, check)
+		} else {
+			a, err = mon.probe(probeCtx, off, check)
+		}
 		if probeCtx.Err() != nil {
 			break
 		}
@@ -460,8 +543,12 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 					continue
 				}
 			}
-			mon.close()
-			mon = nil
+			if viaShell {
+				viaShell, shell = false, nil
+			} else {
+				mon.close()
+				mon = nil
+			}
 			if fails++; fails >= waitMaxFails {
 				return err
 			}
@@ -469,6 +556,7 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			continue
 		}
 		misses, fails = 0, 0
+		lastConnectionNote = ""
 		if a.ready {
 			return nil
 		}

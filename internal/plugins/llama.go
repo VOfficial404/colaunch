@@ -132,7 +132,7 @@ func (l Llama) Validate(ctx context.Context, values map[string]string, hfToken s
 	}
 	quants := hf.Quants(files)
 	if len(quants) == 0 {
-		return nil, fmt.Errorf("%s has no GGUF files", ref.Repo)
+		return nil, hf.NoQuants(ref.Repo, files)
 	}
 	want := wantQuant(ref, values)
 	smallest := quants[0]
@@ -172,6 +172,9 @@ func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
 		return nil, err
 	}
 	quants := hf.Quants(files)
+	if len(quants) == 0 {
+		return nil, hf.NoQuants(ref.Repo, files)
+	}
 	ctxLen := atoi(env.Values["ctx"], 8192)
 
 	// The memory the model may take: the GPU's, or else the machine's.

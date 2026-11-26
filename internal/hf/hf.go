@@ -295,6 +295,39 @@ func Quants(files []File) []Quant {
 	return out
 }
 
+// Why a repository has no quantization to pick, as NoQuants tells.
+var (
+	ErrNoGGUF          = errors.New("hf: the repository has no GGUF files")
+	ErrOnlySafetensors = errors.New("hf: the repository has safetensors weights but no GGUF files")
+	ErrOnlyProjector   = errors.New("hf: the repository's GGUF files are only multimodal projectors (mmproj), not a model")
+	ErrUnnamedGGUF     = errors.New("hf: none of the repository's GGUF files names a quantization, as Q4_K_M")
+)
+
+// NoQuants says why Quants found nothing in a repository's files.
+func NoQuants(repo string, files []File) error {
+	var gguf, proj, st int
+	for _, f := range files {
+		switch p := strings.ToLower(f.Path); {
+		case strings.HasSuffix(p, ".gguf"):
+			gguf++
+			if IsProjector(f.Path) {
+				proj++
+			}
+		case strings.HasSuffix(p, ".safetensors"):
+			st++
+		}
+	}
+	switch {
+	case gguf > 0 && gguf == proj:
+		return fmt.Errorf("%s: %w", repo, ErrOnlyProjector)
+	case gguf > 0:
+		return fmt.Errorf("%s: %w", repo, ErrUnnamedGGUF)
+	case st > 0:
+		return fmt.Errorf("%s: %w (%d .safetensors files)", repo, ErrOnlySafetensors, st)
+	}
+	return fmt.Errorf("%s: %w", repo, ErrNoGGUF)
+}
+
 // IsProjector reports whether a file is a multimodal projector.
 func IsProjector(path string) bool {
 	return strings.Contains(strings.ToLower(path[strings.LastIndexByte(path, '/')+1:]), "mmproj")
@@ -357,7 +390,7 @@ func Pick(quants []Quant, mem, spill int64, ctx int, want string) (Choice, error
 // text encoders and VAE instead of a context.
 func PickBy(quants []Quant, mem, spill int64, want string, need func(size int64) int64) (Choice, error) {
 	if len(quants) == 0 {
-		return Choice{}, errors.New("hf: the repository has no GGUF files")
+		return Choice{}, ErrNoGGUF
 	}
 	if want != "" && want != "AUTO" {
 		for _, q := range quants {

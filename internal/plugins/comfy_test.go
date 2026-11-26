@@ -30,6 +30,21 @@ func fakeHF(t *testing.T) {
 			w.Write([]byte(`[{"type":"file","path":"sd3.5_large-Q4_0.gguf","size":10,"lfs":{"oid":"","size":4800000000}}]`))
 		case "/api/models/a/lora/tree/main":
 			w.Write([]byte(`[{"type":"file","path":"loras/style.safetensors","size":10,"lfs":{"oid":"4444444444444444444444444444444444444444444444444444444444444444","size":300000000}}]`))
+		case "/api/models/Qwen/Qwen2.5-7B-Instruct-GGUF/tree/main":
+			w.Write([]byte(`[{"type":"file","path":"qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf","size":4000000000},
+				{"type":"file","path":"qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf","size":689900000}]`))
+		case "/api/models/dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8":
+			w.Write([]byte(`{"pipeline_tag":"image-text-to-text","tags":["safetensors","deepseek_v41","fp8"]}`))
+		case "/api/models/dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8/tree/main":
+			w.Write([]byte(`[{"type":"file","path":"config.json","size":2000},
+				{"type":"file","path":"model-00001-of-00002.safetensors","size":135,"lfs":{"oid":"","size":5000000000}},
+				{"type":"file","path":"model-00002-of-00002.safetensors","size":135,"lfs":{"oid":"","size":5000000000}}]`))
+		case "/api/models/a/mmproj/tree/main":
+			w.Write([]byte(`[{"type":"file","path":"mmproj-model-f16.gguf","size":10,"lfs":{"oid":"","size":800000000}}]`))
+		case "/api/models/a/unnamed/tree/main":
+			w.Write([]byte(`[{"type":"file","path":"model.gguf","size":10,"lfs":{"oid":"","size":8000000000}},{"type":"file","path":"mmproj-model-f16.gguf","size":10,"lfs":{"oid":"","size":800000000}}]`))
+		case "/api/models/a/empty/tree/main":
+			w.Write([]byte(`[{"type":"file","path":"README.md","size":100}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -98,6 +113,39 @@ func TestLlamaSuggestsComfy(t *testing.T) {
 	}
 	if _, ok := SuggestComfy(errors.New("network down")); ok {
 		t.Error("suggested for any error")
+	}
+}
+
+// A repository without a quantization to pick is refused before a GPU is
+// assigned, saying why: safetensors weights only, a projector only, GGUF
+// files without a quantization in their names, or no GGUF at all.
+func TestLlamaNoQuants(t *testing.T) {
+	fakeHF(t)
+	for repo, want := range map[string]error{
+		"dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8": hf.ErrOnlySafetensors,
+		"a/mmproj":  hf.ErrOnlyProjector,
+		"a/unnamed": hf.ErrUnnamedGGUF,
+		"a/empty":   hf.ErrNoGGUF,
+	} {
+		hw, err := Llama{}.Validate(context.Background(), map[string]string{"repo": repo, "ctx": "8192"}, "")
+		if hw != nil || !errors.Is(err, want) || !strings.HasPrefix(err.Error(), repo+": ") {
+			t.Errorf("%s: %v %v, want %v", repo, hw, err, want)
+		}
+		if _, ok := SuggestComfy(err); ok {
+			t.Errorf("%s: suggested ComfyUI", repo)
+		}
+	}
+	_, err := Llama{}.Validate(context.Background(), map[string]string{"repo": "dealignai/DeepSeek-V4.1-Flash-1017-UNCENSORED-FP8"}, "")
+	if err == nil || !strings.Contains(err.Error(), "(2 .safetensors files)") {
+		t.Errorf("safetensors count: %v", err)
+	}
+}
+
+func TestLlamaValidatesSplitGGUF(t *testing.T) {
+	fakeHF(t)
+	hw, err := Llama{}.Validate(context.Background(), map[string]string{"repo": "Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"}, "")
+	if err != nil || hw == nil || hw.MinMemory != hf.Need(4_689_900_000, 8192) {
+		t.Fatalf("split GGUF preflight: %v, %v", hw, err)
 	}
 }
 

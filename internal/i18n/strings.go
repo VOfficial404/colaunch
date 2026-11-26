@@ -93,6 +93,19 @@ var dict = map[string][3]string{
 	"err.not_llm":      {"This isn't a language model", "这不是语言模型", "這不是語言模型"},
 	"err.not_llm_next": {"Select ‘Deploy as an image/video model’ below to open the ComfyUI task with this repository already filled in.", "点击下方的「改用生图/视频部署」，切换到 ComfyUI 任务并带入这个仓库。", "點選下方的「改用生圖/影片部署」，切換到 ComfyUI 任務並帶入這個儲存庫。"},
 
+	"err.monitor_connection":      {"Colaunch could not read deployment status", "Colaunch 无法读取部署状态", "Colaunch 無法讀取部署狀態"},
+	"err.monitor_connection_next": {"If the runtime is still active, open its log to see where the installation got to.", "如果运行时仍在，请打开「运行时上的日志」查看安装进度。", "如果執行階段仍在執行，請開啟「執行階段上的日誌」查看安裝進度。"},
+	"runtimes.remote_log_empty":   {"The runtime has no plugin log yet.", "运行时上暂时没有插件日志。", "執行階段上暫時沒有外掛日誌。"},
+
+	"err.only_safetensors":      {"This repository has safetensors weights but no GGUF files", "这个仓库有 safetensors 权重，缺少 GGUF 文件", "這個儲存庫有 safetensors 權重，缺少 GGUF 檔案"},
+	"err.only_safetensors_next": {"Colaunch deploys GGUF files only. Find a GGUF version of this model on Hugging Face, often named …-GGUF, and use that repository.", "Colaunch 只部署 GGUF 文件。请在 Hugging Face 上找这个模型的 GGUF 版本（通常名为 …-GGUF），改用那个仓库。", "Colaunch 只部署 GGUF 檔案。請在 Hugging Face 上尋找此模型的 GGUF 版本（通常名為 …-GGUF），改用那個儲存庫。"},
+	"err.only_projector":        {"This repository has only a multimodal projector", "这个仓库只有多模态投影文件", "這個儲存庫只有多模態投影檔案"},
+	"err.only_projector_next":   {"Its GGUF files are mmproj projectors, which go beside a model. Use the repository with the model's own GGUF files.", "其中的 GGUF 都是 mmproj 投影文件，需配合模型本体使用。请改用包含模型本体 GGUF 的仓库。", "其中的 GGUF 都是 mmproj 投影檔案，需搭配模型本體使用。請改用包含模型本體 GGUF 的儲存庫。"},
+	"err.unnamed_gguf":          {"No GGUF filename names a supported quantization", "GGUF 文件名中没有可识别的量化版本", "GGUF 檔名中沒有可辨識的量化版本"},
+	"err.unnamed_gguf_next":     {"Colaunch picks a file by the quantization in its name, as Q4_K_M or Q8_0. Use a repository whose GGUF files are named that way.", "Colaunch 按文件名中的量化版本（如 Q4_K_M、Q8_0）挑选文件。请改用按此命名 GGUF 文件的仓库。", "Colaunch 依檔名中的量化版本（如 Q4_K_M、Q8_0）挑選檔案。請改用以此命名 GGUF 檔案的儲存庫。"},
+	"err.no_gguf":               {"This repository has no GGUF files", "这个仓库没有 GGUF 文件", "這個儲存庫沒有 GGUF 檔案"},
+	"err.no_gguf_next":          {"Colaunch deploys GGUF files only. Check the repository's files, or use a GGUF version of the model.", "Colaunch 只部署 GGUF 文件。请检查仓库中的文件，或改用该模型的 GGUF 版本。", "Colaunch 只部署 GGUF 檔案。請檢查儲存庫中的檔案，或改用此模型的 GGUF 版本。"},
+
 	// Durations
 	"dur.days":    {"%dd %dh", "%d 天 %d 小时", "%d 天 %d 小時"},
 	"dur.hours":   {"%dh %02dm", "%d 小时 %02d 分", "%d 小時 %02d 分"},

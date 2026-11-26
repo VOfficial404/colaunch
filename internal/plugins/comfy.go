@@ -136,7 +136,7 @@ func (Comfy) plan(ctx context.Context, values map[string]string, token string) (
 	}
 	pl.quants = hf.Quants(models)
 	if len(pl.quants) == 0 {
-		return nil, fmt.Errorf("%s has no GGUF files", ref.Repo)
+		return nil, hf.NoQuants(ref.Repo, models)
 	}
 	if want := wantQuant(ref, values); want != "" {
 		found := false

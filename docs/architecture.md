@@ -56,7 +56,14 @@ behind its token. Colaunch uses only the terminal:
   the request's nonce is ignored, one with a bad checksum or range is asked
   again; a terminal that closes, doesn't answer or keeps answering badly is
   replaced by another on the same runtime, reading on from the last offset
-  confirmed. The installer runs detached and doesn't notice.
+  confirmed. The installer keeps running during reconnects. If the monitor
+  cannot connect within 15 seconds, Colaunch tries a read-only probe over
+  the existing control terminal. Each poll pipes one request to
+  `agent.py wait-ready`, which answers and exits. A reply is usable after
+  a missing START marker if END arrives and the reply's nonce, checksum,
+  and log range match the request. A stream's unique ready marker can
+  follow leftover output on the same line. The quoted marker in the
+  echoed command ends with a quote and cannot complete the handshake.
 
 ## The watchdog
 

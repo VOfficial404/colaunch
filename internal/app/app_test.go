@@ -14,6 +14,7 @@ import (
 	"colaunch/internal/agent"
 	"colaunch/internal/colab"
 	"colaunch/internal/core"
+	"colaunch/internal/hf"
 	"colaunch/internal/i18n"
 	"colaunch/internal/plugins"
 )
@@ -253,19 +254,24 @@ func TestHardwareFollowsAccount(t *testing.T) {
 // The errors people meet are explained; others show as they are.
 func TestExplainError(t *testing.T) {
 	cases := map[string]string{
-		colab.ErrUnavailable.Error() + ": L4":                     "err.unavailable",
-		colab.ErrQuota.Error():                                    "err.quota",
-		colab.ErrTooManyRuntimes.Error() + ": stop one":           "err.too_many",
-		colab.ErrDenylisted.Error():                               "err.denylisted",
-		colab.ErrUnauthorized.Error():                             "err.signed_out",
-		"google: the account's sign-in expired or was revoked":    "err.signed_out",
-		"google: no OAuth client is configured (Settings → ...)":  "err.no_client",
-		"colab: the output of command 18 has no start":            "err.terminal_output",
-		"invalid readiness probe response":                        "err.terminal_output",
-		"the readiness probe didn't answer":                       "err.terminal_output",
-		"hf: no such repository, or it needs an access token":     "err.hf_not_found",
-		"gave up after 3 tries in 1m: " + colab.ErrQuota.Error():  "err.quota",
-		"hf: no quantization of the model fits in this machine's": "err.too_big",
+		colab.ErrUnavailable.Error() + ": L4":                    "err.unavailable",
+		colab.ErrQuota.Error():                                   "err.quota",
+		colab.ErrTooManyRuntimes.Error() + ": stop one":          "err.too_many",
+		colab.ErrDenylisted.Error():                              "err.denylisted",
+		colab.ErrUnauthorized.Error():                            "err.signed_out",
+		"google: the account's sign-in expired or was revoked":   "err.signed_out",
+		"google: no OAuth client is configured (Settings → ...)": "err.no_client",
+		"colab: the output of command 18 has no start":           "err.terminal_output",
+		"opening a terminal to wait on: context deadline exceeded\ncolab: the terminal command didn't start": "err.monitor_connection",
+		"invalid readiness probe response":                                   "err.terminal_output",
+		"the readiness probe didn't answer":                                  "err.terminal_output",
+		"hf: no such repository, or it needs an access token":                "err.hf_not_found",
+		"gave up after 3 tries in 1m: " + colab.ErrQuota.Error():             "err.quota",
+		"hf: no quantization of the model fits in this machine's":            "err.too_big",
+		"a/b: " + hf.ErrOnlySafetensors.Error() + " (46 .safetensors files)": "err.only_safetensors",
+		"a/b: " + hf.ErrOnlyProjector.Error():                                "err.only_projector",
+		"a/b: " + hf.ErrUnnamedGGUF.Error():                                  "err.unnamed_gguf",
+		"a/b: " + hf.ErrNoGGUF.Error():                                       "err.no_gguf",
 	}
 	for msg, want := range cases {
 		if got, next, ok := explainError(msg); !ok || got != want || next != want+"_next" {

@@ -27,10 +27,15 @@ var knownErrors = []knownError{
 	{key: "err.too_many", next: "err.too_many_next", match: []string{"too many runtimes", "too_many_active_runtimes"}},
 	{key: "err.quota", next: "err.quota_next", match: []string{"not enough compute units", "usage quota", "quota_exceeded"}},
 	{key: "err.unavailable", next: "err.unavailable_next", match: []string{"no such accelerator is available", "no accelerator is available"}},
+	{key: "err.monitor_connection", next: "err.monitor_connection_next", match: []string{"opening a terminal to wait on", "colab: the terminal command didn't start"}},
 	{key: "err.terminal_output", next: "err.terminal_output_next", match: []string{"colab: the output of command ", "invalid readiness probe response", "the readiness probe didn't answer"}},
 	{key: "err.hf_not_found", next: "err.hf_not_found_next", match: []string{"hf: no such repository"}},
 	{key: "err.too_big", next: "err.too_big_next", match: []string{"no quantization of the model fits"}},
 	{key: "err.not_llm", next: "err.not_llm_next", match: []string{"llama.cpp can't serve"}},
+	{key: "err.only_safetensors", next: "err.only_safetensors_next", match: []string{"safetensors weights but no gguf"}},
+	{key: "err.only_projector", next: "err.only_projector_next", match: []string{"are only multimodal projectors"}},
+	{key: "err.unnamed_gguf", next: "err.unnamed_gguf_next", match: []string{"gguf files names a quantization"}},
+	{key: "err.no_gguf", next: "err.no_gguf_next", match: []string{"has no gguf files"}},
 }
 
 // explainError finds what an error's text means to the user: the i18n

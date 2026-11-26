@@ -269,12 +269,14 @@ func (a *App) sessionCard(c *ui.Context, s *core.Session) {
 			if labeledButton(c, iconLog, i18n.T("runtimes.log"), false).Clicked() {
 				r.showLog[s.ID] = !r.showLog[s.ID]
 			}
-			if s.Phase == core.PhaseRunning {
+			if s.Phase == core.PhaseDeploying || s.Phase == core.PhaseRunning {
 				if labeledButton(c, iconRefresh, i18n.T("runtimes.remote_log"), false).Clicked() {
 					id := s.ID
 					a.m.Logs(s, func(out string, err error) {
 						if err != nil {
 							out = err.Error()
+						} else if strings.TrimSpace(out) == "" {
+							out = i18n.T("runtimes.remote_log_empty")
 						}
 						r.remoteLog[id] = out
 						r.showLog[id] = true

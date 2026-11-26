@@ -334,6 +334,17 @@ func (missingStartError) Unwrap() error { return ErrMissingStart }
 // Run runs a bash command and returns what it printed, stdout and stderr
 // together, and its exit status.
 func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
+	return s.run(ctx, cmd, "")
+}
+
+// RunFramed also returns output if START was lost but a complete END was
+// received and the output contains the caller's unique response prefix.
+// The caller must validate its frame before using it.
+func (s *Shell) RunFramed(ctx context.Context, cmd, prefix string) (string, int, error) {
+	return s.run(ctx, cmd, prefix)
+}
+
+func (s *Shell) run(ctx context.Context, cmd, prefix string) (string, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.n++
@@ -362,6 +373,9 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
 	i := bytes.LastIndex(before, startMark)
 	if i < 0 {
+		if prefix != "" && bytes.Count(before, []byte(prefix)) == 1 {
+			return string(before), code, nil
+		}
 		return "", -1, missingStartError(n)
 	}
 	return string(before[i+len(startMark):]), code, nil
@@ -463,7 +477,7 @@ func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY,
 				found <- err
 				return
 			}
-			if strings.TrimSpace(line) == ready {
+			if isReadyLine(line, ready) {
 				found <- nil
 				return
 			}
@@ -483,6 +497,14 @@ func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY,
 		return nil, nil, errors.New("colab: the terminal command didn't start")
 	}
 	return tty, r, nil
+}
+
+// isReadyLine tells whether a line the terminal printed is the command's
+// ready line: ready ending it, alone or after bytes an earlier terminal
+// printed without ending their line. The command's own line, echoed as
+// typed, has ready inside quotes, so it doesn't end with it.
+func isReadyLine(line, ready string) bool {
+	return strings.HasSuffix(strings.TrimRight(line, " \t\r\n"), ready)
 }
 
 func shellQuote(s string) string {
