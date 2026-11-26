@@ -96,16 +96,23 @@ func (t *TTY) Read(p []byte) (int, error) { return t.r.Read(p) }
 
 // WriteString types s into the terminal.
 func (t *TTY) WriteString(s string) error {
+	return t.writeString(context.Background(), s)
+}
+
+func (t *TTY) writeString(ctx context.Context, s string) error {
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 	// Small messages: proxies limit what they read at once, Colab's too
 	// perhaps, and 32 KiB is a common limit.
 	const chunk = 8 << 10
 	for len(s) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		n := min(len(s), chunk)
 		b, _ := json.Marshal(map[string]string{"data": s[:n]})
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		err := t.ws.Write(ctx, websocket.MessageText, b)
+		writeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		err := t.ws.Write(writeCtx, websocket.MessageText, b)
 		cancel()
 		if err != nil {
 			return err
@@ -295,6 +302,18 @@ func (s *Shell) wait(ctx context.Context, marker string, code bool) ([]byte, int
 	}
 }
 
+// ErrMissingStart means Run consumed the command's complete END marker,
+// but its output had no complete START marker.
+var ErrMissingStart = errors.New("colab: missing command start marker")
+
+type missingStartError int
+
+func (n missingStartError) Error() string {
+	return fmt.Sprintf("colab: the output of command %d has no start", n)
+}
+
+func (missingStartError) Unwrap() error { return ErrMissingStart }
+
 // Run runs a bash command and returns what it printed, stdout and stderr
 // together, and its exit status.
 func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
@@ -316,7 +335,7 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	// Typed, the markers have quotes inside; printed, they have none. The
 	// command runs in a subshell, so that its exit or cd leaves the shell be.
 	line := fmt.Sprintf("echo @@S\"\"TART-%d@@; (eval \"$(echo %s | base64 -d)\") </dev/null 2>&1; echo \"@@E\"\"ND-%d:$?@@\"\n", n, enc, n)
-	if err := s.tty.WriteString(line); err != nil {
+	if err := s.tty.writeString(ctx, line); err != nil {
 		return "", -1, err
 	}
 	before, code, err := s.wait(ctx, fmt.Sprintf("@@END-%d:", n), true)
@@ -326,7 +345,7 @@ func (s *Shell) Run(ctx context.Context, cmd string) (string, int, error) {
 	startMark := []byte(fmt.Sprintf("@@START-%d@@\n", n))
 	i := bytes.LastIndex(before, startMark)
 	if i < 0 {
-		return "", -1, fmt.Errorf("colab: the output of command %d has no start", n)
+		return "", -1, missingStartError(n)
 	}
 	return string(before[i+len(startMark):]), code, nil
 }
@@ -364,7 +383,7 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 		"if [ $__s = 0 ]; then if [ -d \"$__f\" ] && [ ! -L \"$__f\" ]; then __s=1; else mv -f \"$__p\" \"$__f\"; __s=$?; fi; fi; [ $__s = 0 ] || rm -f \"$__p\"; fi; "+
 		"echo \"@@D\"\"ONE-%d:$__s@@\"\n",
 		vars, prep, n, len(enc), n)
-	if err := s.tty.WriteString(cmd); err != nil {
+	if err := s.tty.writeString(ctx, cmd); err != nil {
 		return err
 	}
 	_, code, err := s.wait(ctx, fmt.Sprintf("@@READY-%d:", n), true)
@@ -372,7 +391,7 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 		return err
 	}
 	if code == 0 {
-		if err := s.tty.WriteString(enc); err != nil {
+		if err := s.tty.writeString(ctx, enc); err != nil {
 			return err
 		}
 	}

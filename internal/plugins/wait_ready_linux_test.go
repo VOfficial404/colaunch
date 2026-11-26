@@ -1,7 +1,6 @@
 package plugins
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -73,12 +72,12 @@ runpy.run_path(sys.argv[1])["write_pid"](sys.argv[2], int(sys.argv[3]))`, script
 		t.Fatalf("PID record %s: %v", current, err)
 	}
 
-	probe := func(check, beforeRunning string) string {
+	probe := func(off int, check, beforeRunning string) string {
 		t.Helper()
 		command := strings.NewReplacer(
 			"python3 "+ShellQuote(agent.Path), beforeRunning+ShellQuote(python)+" "+ShellQuote(script),
 			ShellQuote(agent.PluginDir(id)+"/log.txt"), ShellQuote(logPath),
-		).Replace(waitReadyProbe(id, 0, check))
+		).Replace(waitReadyProbe(id, int64(off), check))
 		cmd := exec.Command("bash", "-c", command)
 		cmd.Env = append(os.Environ(), "COLAUNCH_HOME="+home)
 		out, err := cmd.CombinedOutput()
@@ -96,13 +95,13 @@ runpy.run_path(sys.argv[1])["write_pid"](sys.argv[2], int(sys.argv[3]))`, script
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			write(pidPath, tc.record)
-			want := fmt.Sprintf("@@WAIT %d 0 %s@@\n%s\n", len(log), tc.want, base64.StdEncoding.EncodeToString([]byte(log)))
-			if got := probe("false", ""); got != want {
+			want := probeLog(len(log), 0, log, tc.want)
+			if got := probe(0, "false", ""); got != want {
 				t.Errorf("probe = %q, want %q", got, want)
 			}
 		})
 	}
-	if got := probe("true", ""); got != "@@WAIT-READY@@\n" {
+	if got := probe(0, "true", ""); got != "@@WAIT-READY@@\n" {
 		t.Errorf("ready probe = %q", got)
 	}
 
@@ -110,8 +109,29 @@ runpy.run_path(sys.argv[1])["write_pid"](sys.argv[2], int(sys.argv[3]))`, script
 	write(pidPath, strconv.Itoa(os.Getpid()))
 	const finalError = "fatal: couldn't clone ComfyUI\n"
 	prefix := "printf '%s' " + ShellQuote(finalError) + " >> " + ShellQuote(logPath) + "; "
-	want := fmt.Sprintf("@@WAIT %d 0 no@@\n%s\n", len(log+finalError), base64.StdEncoding.EncodeToString([]byte(log+finalError)))
-	if got := probe("false", prefix); got != want {
+	if got, want := probe(0, "false", prefix), probeLog(len(log+finalError), 0, log+finalError, "no"); got != want {
 		t.Errorf("final probe = %q, want %q", got, want)
+	}
+
+	const maxBytes = 16 << 10
+	backlog := strings.Repeat("x", maxBytes) + strings.Repeat("y", maxBytes) + log + finalError
+	write(logPath, backlog)
+	for _, tc := range []struct {
+		name, record, running string
+		off, from             int
+	}{
+		{"first chunk", string(current), "yes", 0, 0},
+		{"next chunk", string(current), "yes", maxBytes, maxBytes},
+		{"stopped tail", strconv.Itoa(os.Getpid()), "no", 0, len(backlog) - maxBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			write(pidPath, tc.record)
+			want := probeLog(len(backlog), tc.from, backlog[tc.from:tc.from+maxBytes], tc.running)
+			got := probe(tc.off, "false", "")
+			if got != want {
+				head, _, _ := strings.Cut(got, "\n")
+				t.Errorf("probe has %d bytes and header %q, want %d bytes with log range [%d, %d)", len(got), head, len(want), tc.from, tc.from+maxBytes)
+			}
+		})
 	}
 }

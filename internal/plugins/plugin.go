@@ -220,54 +220,77 @@ func checkRequired(p Plugin, values map[string]string, lang string) error {
 	return nil
 }
 
+const waitLogChunk = 16 << 10
+
 // waitReadyProbe builds the command that runs the check. If the check fails,
-// the command reports whether the plugin is still running and sends up to
-// 256 KiB of new log bytes in base64 to preserve carriage returns.
+// it reports liveness and at most one chunk of log bytes, in base64 to
+// preserve carriage returns. Once stopped, read the end for diagnostics.
 func waitReadyProbe(id string, off int64, check string) string {
 	return fmt.Sprintf(`if (%s) >/dev/null 2>&1 </dev/null; then echo @@WAIT-READY@@; exit 0; fi
 run=$(python3 %s running %s 2>/dev/null) || run=unknown
 f=%s; sz=$(stat -c %%s "$f" 2>/dev/null || echo 0); off=%d
-[ "$sz" -lt "$off" ] && off=0; [ $((sz - off)) -gt 262144 ] && off=$((sz - 262144))
-echo "@@WAIT $sz $off $run@@"; tail -c +$((off + 1)) "$f" 2>/dev/null | head -c $((sz - off)) | base64 -w0; echo`,
-		check, ShellQuote(agent.Path), ShellQuote(id), ShellQuote(agent.PluginDir(id)+"/log.txt"), off)
+((off > sz)) && off=0
+n=$((sz - off)); ((n > %d)) && n=%d
+[ "$run" = no ] && off=$((sz - n))
+echo "@@WAIT $sz $off $run@@"; tail -c +$((off + 1)) "$f" 2>/dev/null | head -c "$n" | base64 -w0; echo`,
+		check, ShellQuote(agent.Path), ShellQuote(id), ShellQuote(agent.PluginDir(id)+"/log.txt"), off, waitLogChunk, waitLogChunk)
 }
 
 // waitReady polls check every few seconds until it's true, the plugin's
 // process ends, or ctx is done. Each poll shows the log's new lines.
 func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check string) error {
-	deadline := time.Now().Add(timeout)
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	const maxMissingStarts = 3
+	var misses int
 	var off int64
 	var carry []byte
 	var recent []string
-	for {
-		out, _, err := env.Shell.Run(ctx, waitReadyProbe(id, off, check))
+	for probeCtx.Err() == nil {
+		out, _, err := env.Shell.Run(probeCtx, waitReadyProbe(id, off, check))
+		if probeCtx.Err() != nil {
+			break
+		}
 		if err != nil {
-			return err
+			// END has already been consumed, so the same shell can run
+			// another read-only probe from the last confirmed offset.
+			if !errors.Is(err, colab.ErrMissingStart) {
+				return err
+			}
+			misses++
+			if misses == maxMissingStarts {
+				return err
+			}
+			continue
 		}
 		if strings.Contains(out, "@@WAIT-READY@@") {
 			return nil
 		}
-		running, logRead := true, false
+		running, atEnd, more := true, false, false
 		if i := strings.Index(out, "@@WAIT "); i >= 0 {
 			head, data, _ := strings.Cut(out[i+len("@@WAIT "):], "\n")
 			var size, from int64
 			var run string
 			if _, err := fmt.Sscanf(strings.TrimSuffix(head, "@@"), "%d %d %s", &size, &from, &run); err == nil {
-				if from != off {
-					// The log was cut, or grew past what one poll takes.
-					carry = nil
-				}
-				if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data)); err == nil && int64(len(b)) == size-from {
-					carry = showNew(env, carry, b, &recent)
-					off, logRead = size, true
-				}
 				running = run != "no"
+				if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data)); err == nil &&
+					from >= 0 && size >= from && int64(len(b)) == min(size-from, waitLogChunk) {
+					if from != off {
+						// The log shrank, or the plugin stopped with unread logs.
+						carry = nil
+					}
+					carry = showNew(env, carry, b, &recent)
+					off = from + int64(len(b))
+					atEnd, more = off == size, off < size
+					misses = 0
+				}
 			}
 		}
 		if !running {
-			if !logRead {
-				// Try the log command if the last poll couldn't read its snapshot.
-				if out, err := agent.Logs(ctx, env.Shell, id, 50); err == nil && strings.TrimSpace(out) != "" {
+			if !atEnd && probeCtx.Err() == nil {
+				// Keep the existing log fallback bounded on the terminal, too.
+				cmd := fmt.Sprintf("python3 %s logs %s 50 | tail -c %d", ShellQuote(agent.Path), ShellQuote(id), waitLogChunk)
+				if out, _, err := env.Shell.Run(probeCtx, cmd); err == nil && strings.TrimSpace(out) != "" {
 					recent, carry = strings.Split(out, "\n"), nil
 				}
 			}
@@ -285,15 +308,18 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			}
 			return fmt.Errorf("the plugin stopped: %s", lastLines(strings.Join(tail, "\n"), 12))
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("the plugin didn't get ready in %s", timeout)
+		if more {
+			continue
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-probeCtx.Done():
 		case <-time.After(4 * time.Second):
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("the plugin didn't get ready in %s", timeout)
 }
 
 // showNew logs the whole lines of carry and chunk, the bytes the log

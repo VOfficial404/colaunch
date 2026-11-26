@@ -2,6 +2,10 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.10]
+
+- Retry deployment status checks on the same runtime when Colab's terminal returns an incomplete command response, so a transient error no longer interrupts an installation. The app explains the terminal error if it persists.
+
 ## [0.1.9]
 
 - Fix a deployment error where Colaunch reported that ComfyUI or another plugin had stopped while it was still starting. Colaunch now reads the runtime's process record correctly and captures the final log lines if the plugin exits.
