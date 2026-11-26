@@ -6,6 +6,7 @@
 #   agent.py watchdog          unassign the runtime when it's time, or idle
 #   agent.py status            print the runtime's state as JSON
 #   agent.py run ID SCRIPT     run a plugin's script in the background
+#   agent.py running ID        print yes, no, or unknown for a plugin
 #   agent.py stop ID           stop a plugin
 #   agent.py logs ID [LINES]   print the end of a plugin's log
 #   agent.py unassign REASON   give the runtime back to Colab now
@@ -424,6 +425,16 @@ def run(pid_name, script):
     print(p.pid)
 
 
+def running(pid_name):
+    rec = read_pid(os.path.join(plugin_dir(pid_name), "pid"))
+    if rec is None:
+        return "unknown"
+    owned = plugin_owns(pid_name, rec)
+    if owned is None:
+        return "unknown"
+    return "yes" if owned else "no"
+
+
 def stop(pid_name, quiet=False, forget=False):
     """Stops a plugin's processes, once sure its pid is still the plugin's.
     forget also removes what's left of its secrets."""
@@ -622,7 +633,7 @@ def watchdog():
 
 def main():
     if len(sys.argv) < 2:
-        print(__doc__ or "usage: agent.py mux|watchdog|status|run|stop|logs|unassign")
+        print(__doc__ or "usage: agent.py mux|watchdog|status|run|running|stop|logs|unassign")
         sys.exit(2)
     cmd = sys.argv[1]
     if cmd == "mux":
@@ -633,6 +644,8 @@ def main():
         status()
     elif cmd == "run":
         run(sys.argv[2], sys.argv[3])
+    elif cmd == "running":
+        print(running(sys.argv[2]))
     elif cmd == "stop":
         stop(sys.argv[2], forget=True)
     elif cmd == "prepare":

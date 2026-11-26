@@ -2,6 +2,10 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.9]
+
+- Fix a deployment error where Colaunch reported that ComfyUI or another plugin had stopped while it was still starting. Colaunch now reads the runtime's process record correctly and captures the final log lines if the plugin exits.
+
 ## [0.1.8]
 
 - Colaunch checks for updates on every platform: ten seconds after it starts, every 12 hours and when you come back to it. A new version shows above the account in the sidebar, or as a dot on Settings on phones, with its notes. On desktop **Update now** installs it; on Android **Download APK** gets the new APK; on iOS it opens the release to sideload. You can skip a version, and turn the checks off under **Settings → About**. Check by hand there too.

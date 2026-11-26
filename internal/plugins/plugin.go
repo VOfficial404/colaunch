@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -219,34 +220,34 @@ func checkRequired(p Plugin, values map[string]string, lang string) error {
 	return nil
 }
 
+// waitReadyProbe builds the command that runs the check. If the check fails,
+// the command reports whether the plugin is still running and sends up to
+// 256 KiB of new log bytes in base64 to preserve carriage returns.
+func waitReadyProbe(id string, off int64, check string) string {
+	return fmt.Sprintf(`if (%s) >/dev/null 2>&1 </dev/null; then echo @@WAIT-READY@@; exit 0; fi
+run=$(python3 %s running %s 2>/dev/null) || run=unknown
+f=%s; sz=$(stat -c %%s "$f" 2>/dev/null || echo 0); off=%d
+[ "$sz" -lt "$off" ] && off=0; [ $((sz - off)) -gt 262144 ] && off=$((sz - 262144))
+echo "@@WAIT $sz $off $run@@"; tail -c +$((off + 1)) "$f" 2>/dev/null | head -c $((sz - off)) | base64 -w0; echo`,
+		check, ShellQuote(agent.Path), ShellQuote(id), ShellQuote(agent.PluginDir(id)+"/log.txt"), off)
+}
+
 // waitReady polls check every few seconds until it's true, the plugin's
 // process ends, or ctx is done. Each poll shows the log's new lines.
-//
-// A poll is one command on the runtime: the check, and when it fails, the
-// bytes the log grew by since the last poll (at most 256 KiB, in base64 so
-// that the terminal keeps the progress bars' carriage returns) and whether
-// the plugin's process is alive.
 func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check string) error {
 	deadline := time.Now().Add(timeout)
-	dir := agent.Home + "/plugins/" + id
 	var off int64
 	var carry []byte
 	var recent []string
 	for {
-		cmd := fmt.Sprintf(`if (%s) >/dev/null 2>&1 </dev/null; then echo @@WAIT-READY@@; exit 0; fi
-f=%s; sz=$(stat -c %%s "$f" 2>/dev/null || echo 0); off=%d
-[ "$sz" -lt "$off" ] && off=0; [ $((sz - off)) -gt 262144 ] && off=$((sz - 262144))
-run=unknown; pid=$(cat %s 2>/dev/null) && [ -n "$pid" ] && { kill -0 "$pid" 2>/dev/null && run=yes || run=no; }
-echo "@@WAIT $sz $off $run@@"; tail -c +$((off + 1)) "$f" 2>/dev/null | head -c $((sz - off)) | base64 -w0; echo`,
-			check, ShellQuote(dir+"/log.txt"), off, ShellQuote(dir+"/pid"))
-		out, _, err := env.Shell.Run(ctx, cmd)
+		out, _, err := env.Shell.Run(ctx, waitReadyProbe(id, off, check))
 		if err != nil {
 			return err
 		}
 		if strings.Contains(out, "@@WAIT-READY@@") {
 			return nil
 		}
-		running := true
+		running, logRead := true, false
 		if i := strings.Index(out, "@@WAIT "); i >= 0 {
 			head, data, _ := strings.Cut(out[i+len("@@WAIT "):], "\n")
 			var size, from int64
@@ -256,19 +257,33 @@ echo "@@WAIT $sz $off $run@@"; tail -c +$((off + 1)) "$f" 2>/dev/null | head -c 
 					// The log was cut, or grew past what one poll takes.
 					carry = nil
 				}
-				if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data)); err == nil {
+				if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data)); err == nil && int64(len(b)) == size-from {
 					carry = showNew(env, carry, b, &recent)
-					off = size
+					off, logRead = size, true
 				}
 				running = run != "no"
 			}
 		}
 		if !running {
-			tail := recent
-			if len(carry) > 0 {
-				tail = append(tail, string(carry))
+			if !logRead {
+				// Try the log command if the last poll couldn't read its snapshot.
+				if out, err := agent.Logs(ctx, env.Shell, id, 50); err == nil && strings.TrimSpace(out) != "" {
+					recent, carry = strings.Split(out, "\n"), nil
+				}
 			}
-			return fmt.Errorf("the plugin stopped: %s", strings.Join(tail, "\n"))
+			if line := pluginLogLine(string(carry)); line != "" {
+				recent = append(recent, line)
+			}
+			var tail []string
+			for _, line := range recent {
+				if line := pluginLogLine(line); line != "" {
+					tail = append(tail, line)
+				}
+			}
+			if len(tail) == 0 {
+				return errors.New("the plugin stopped")
+			}
+			return fmt.Errorf("the plugin stopped: %s", lastLines(strings.Join(tail, "\n"), 12))
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("the plugin didn't get ready in %s", timeout)
@@ -294,18 +309,17 @@ func showNew(env *Env, carry, chunk []byte, recent *[]string) []byte {
 		return data
 	}
 	lines := strings.Split(string(data[:end]), "\n")
-	for i, l := range lines {
-		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
-			l = l[j+1:]
-		}
-		// Terminal escapes, as tools print for colors and progress, are
-		// noise in the app's log.
-		lines[i] = stripEscapes(l)
-	}
 	// The plugin's script prints its phases.
-	if p := lastPhase(strings.Join(lines, "\n")); p != "" {
+	if p := lastPhase(string(data[:end])); p != "" {
 		env.Phase(p)
 	}
+	visible := lines[:0]
+	for _, line := range lines {
+		if line := pluginLogLine(line); line != "" {
+			visible = append(visible, line)
+		}
+	}
+	lines = visible
 	*recent = append(*recent, lines...)
 	if len(*recent) > 12 {
 		*recent = append([]string(nil), (*recent)[len(*recent)-12:]...)
@@ -313,12 +327,22 @@ func showNew(env *Env, carry, chunk []byte, recent *[]string) []byte {
 	if len(lines) > 400 {
 		lines = lines[len(lines)-400:]
 	}
-	for _, l := range lines {
-		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "@@PHASE") {
-			env.Log("%s", l)
-		}
+	for _, line := range lines {
+		env.Log("%s", line)
 	}
 	return append([]byte(nil), data[end+1:]...)
+}
+
+func pluginLogLine(line string) string {
+	line = strings.TrimSuffix(line, "\r")
+	if i := strings.LastIndexByte(line, '\r'); i >= 0 {
+		line = line[i+1:]
+	}
+	line = strings.TrimSpace(stripEscapes(line))
+	if strings.HasPrefix(line, "@@PHASE ") && strings.HasSuffix(line, "@@") {
+		return ""
+	}
+	return line
 }
 
 func lastPhase(logs string) string {
