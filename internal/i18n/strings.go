@@ -3,6 +3,28 @@ package i18n
 // dict holds each string in English, Simplified Chinese and Traditional
 // Chinese, in that order.
 var dict = map[string][3]string{
+	"transport.ssh":           {"Connected over SSH", "已通过 SSH 连接", "已透過 SSH 連線"},
+	"transport.tty":           {"SSH unavailable (HTTP %d); using the Colab terminal", "SSH 不可用（HTTP %d），正在使用 Colab 终端", "SSH 無法使用（HTTP %d），正在使用 Colab 終端機"},
+	"transport.tty_busy":      {"The Colab terminal is forwarding traffic. Close the forwarded connections and try again.", "Colab 终端正在转发流量。请关闭转发连接后重试。", "Colab 終端機正在轉送流量。請關閉轉送連線後再試一次。"},
+	"transport.key_generate":  {"Could not create the Colab SSH key", "无法创建 Colab SSH 密钥", "無法建立 Colab SSH 金鑰"},
+	"transport.forward_error": {"Could not connect to runtime port %d: %s", "无法连接到运行时端口 %d：%s", "無法連線至執行階段連接埠 %d：%s"},
+
+	"transport.ssh_key_rejected": {"Colab rejected the SSH key (HTTP %d)", "Colab 拒绝了 SSH 密钥（HTTP %d）", "Colab 拒絕了 SSH 金鑰（HTTP %d）"},
+	"transport.ssh_token":        {"The Colab SSH proxy token is invalid or expired (HTTP %d)", "Colab SSH 代理令牌无效或已过期（HTTP %d）", "Colab SSH Proxy 權杖無效或已過期（HTTP %d）"},
+	"transport.ssh_forbidden":    {"Colab refused SSH access (HTTP %d)", "Colab 拒绝了 SSH 访问（HTTP %d）", "Colab 拒絕了 SSH 存取（HTTP %d）"},
+	"transport.ssh_missing":      {"The Colab runtime has no SSH endpoint (HTTP %d)", "Colab 运行时没有 SSH 端点（HTTP %d）", "Colab 執行階段沒有 SSH 端點（HTTP %d）"},
+	"transport.ssh_limit":        {"The Colab runtime has reached its SSH connection limit (HTTP %d)", "Colab 运行时已达到 SSH 连接上限（HTTP %d）", "Colab 執行階段已達 SSH 連線上限（HTTP %d）"},
+	"transport.ssh_at_limit":     {"Colab SSH connection limit reached (HTTP %d). %d of %d connections are in use.", "Colab SSH 连接已达到上限（HTTP %d）。已使用 %d 个连接，上限为 %d 个。", "Colab SSH 連線已達上限（HTTP %d）。已使用 %d 個連線，上限為 %d 個。"},
+	"transport.ssh_unreachable":  {"Colab could not reach the runtime’s SSH server (HTTP %d)", "Colab 无法连接到运行时的 SSH 服务器（HTTP %d）", "Colab 無法連線至執行階段的 SSH 伺服器（HTTP %d）"},
+	"transport.ssh_upgrade":      {"The Colab SSH upgrade was rejected (HTTP %d)", "Colab SSH 升级请求被拒绝（HTTP %d）", "Colab SSH 升級請求遭拒（HTTP %d）"},
+	"transport.upgrade_failed":   {"Colab SSH upgrade failed (%v)", "Colab SSH 升级失败（%v）", "Colab SSH 升級失敗（%v）"},
+	"transport.handshake_failed": {"Colab SSH handshake failed (%v)", "Colab SSH 握手失败（%v）", "Colab SSH 交握失敗（%v）"},
+	"transport.proxy_invalid":    {"The Colab SSH proxy address is invalid", "Colab SSH 代理地址无效", "Colab SSH Proxy 位址無效"},
+	"transport.port_invalid":     {"The runtime port must be between 1 and 65535", "运行时端口必须在 1 到 65535 之间", "執行階段連接埠必須介於 1 至 65535"},
+	"transport.upload_failed":    {"Could not upload %s (exit status %d)", "无法上传 %s（退出状态 %d）", "無法上傳 %s（結束狀態 %d）"},
+	"transport.ssh_closed":       {"The Colab SSH connection closed", "Colab SSH 连接已关闭", "Colab SSH 連線已關閉"},
+	"transport.ssh_host_key":     {"The runtime’s SSH host key changed", "运行时的 SSH 主机密钥已更改", "執行階段的 SSH 主機金鑰已變更"},
+
 	// Navigation
 	"nav.deploy":   {"Deploy", "部署", "部署"},
 	"nav.runtimes": {"Runtimes", "运行时", "執行階段"},

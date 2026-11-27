@@ -172,16 +172,21 @@ class Mux:
         stdin = os.fdopen(0, "rb", buffering=0)
         buf = b""
         self.send("@@COLAUNCH-MUX-READY@@")
-        while True:
-            chunk = stdin.read(65536)
-            if not chunk:
-                break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                self.handle(line.decode("ascii", "replace").strip())
-        for s in list(self.socks.values()):
-            s.close()
+        try:
+            while True:
+                chunk = stdin.read(65536)
+                if not chunk:
+                    return
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.decode("ascii", "replace").strip()
+                    if line == "@@COLAUNCH-MUX-QUIT@@":
+                        return
+                    self.handle(line)
+        finally:
+            for s in list(self.socks.values()):
+                s.close()
 
     def handle(self, line):
         if not line:

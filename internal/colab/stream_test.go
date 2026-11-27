@@ -15,9 +15,9 @@ import (
 
 // streamTerminal serves /colab/tty as a terminal that, once it reads the
 // line starting the command, prints out.
-func streamTerminal(t *testing.T, out string) *Connection {
+func streamTerminal(t *testing.T, out string) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -36,7 +36,7 @@ func streamTerminal(t *testing.T, out string) *Connection {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return &Connection{URL: srv.URL}
+	return srv
 }
 
 // The command's ready line may follow what an earlier terminal printed
@@ -61,7 +61,8 @@ func TestStreamReadyLine(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
 			defer cancel()
-			tty, _, err := Stream(ctx, streamTerminal(t, c.out), command, ready)
+			srv := streamTerminal(t, c.out)
+			tty, _, err := openStream(ctx, &Connection{URL: srv.URL}, "exec "+command, ready, false, srv.Client())
 			if tty != nil {
 				tty.Close()
 			}

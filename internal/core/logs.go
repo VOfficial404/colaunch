@@ -67,7 +67,7 @@ func isDeployTransportError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, errReplaced) {
 		return false
 	}
-	if errors.Is(err, colab.ErrMissingStart) {
+	if errors.Is(err, colab.ErrMissingStart) || errors.Is(err, colab.ErrSSHClosed) {
 		return true
 	}
 	msg := err.Error()

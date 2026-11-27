@@ -3,7 +3,9 @@ package tunnel
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -89,7 +91,7 @@ func echoServer(t *testing.T) int {
 func TestForwardThroughAgent(t *testing.T) {
 	m := startMux(t)
 	port := echoServer(t)
-	f, err := Listen("127.0.0.1:0", port, func() (*Mux, error) { return m, nil })
+	f, err := Listen("127.0.0.1:0", port, m, ForwardOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,5 +132,32 @@ func TestDialClosedPort(t *testing.T) {
 	ln.Close()
 	if _, err := m.Dial(port); err == nil {
 		t.Fatal(fmt.Sprintf("dialing closed port %d worked", port))
+	}
+}
+
+func TestForwardReportsDialFailureOnce(t *testing.T) {
+	want := errors.New("runtime connection failed")
+	reported := make(chan error, 2)
+	forward, err := Listen(":0", 8188, ForwardDialFunc(func(context.Context, int) (io.ReadWriteCloser, error) {
+		return nil, want
+	}), ForwardOptions{OnDialError: func(err error) { reported <- err }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forward.Close()
+	for range 2 {
+		conn, err := net.DialTimeout("tcp", forward.Local, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		_, err = conn.Read(make([]byte, 1))
+		conn.Close()
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("forward did not close the failed connection: %v", err)
+		}
+	}
+	if len(reported) != 1 || !errors.Is(<-reported, want) {
+		t.Fatal("forward did not report the dial error exactly once")
 	}
 }

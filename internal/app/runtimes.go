@@ -436,13 +436,21 @@ func (a *App) endpoints(c *ui.Context, s *core.Session) {
 				})
 				ui.Column(c.Key(f)).Gap(6).Children(func() { a.publicLink(c, s, f); a.domainLink(c, s, f) })
 			case plugins.PortWeb, plugins.PortComfy:
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					a.copyable(c, f.Port.Name, f.URL())
+				ui.Column(c.Key(f)).Gap(6).Children(func() {
+					if address := f.URL(); address != "" {
+						a.copyable(c, f.Port.Name, address)
+						if labeledButton(c, iconExternal, i18n.T("open"), false).Clicked() {
+							openURL(address)
+						}
+					} else {
+						ui.Text(c, fmt.Sprintf("%s · %s", f.Port.Name, f.ListeningAddress())).FontSize(13)
+					}
+					if f.Port.Kind == plugins.PortComfy {
+						a.forwardHealth(c.Key("health"), s, f)
+					}
+					a.publicLink(c, s, f)
+					a.domainLink(c, s, f)
 				})
-				if labeledButton(c, iconExternal, i18n.T("open"), false).Clicked() {
-					openURL(f.URL())
-				}
-				ui.Column(c.Key(f)).Gap(6).Children(func() { a.publicLink(c, s, f); a.domainLink(c, s, f) })
 			default:
 				a.copyable(c, f.Port.Name, f.Address())
 			}

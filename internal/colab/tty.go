@@ -46,19 +46,30 @@ func lockTerminal(ctx context.Context, gate chan struct{}) error {
 	}
 }
 
+const ttyPath = "/colab/tty"
+
 // DialTTY opens a terminal on the runtime.
 func DialTTY(ctx context.Context, conn *Connection) (*TTY, error) {
-	u := strings.TrimSuffix(conn.URL, "/") + "/colab/tty"
-	u = "ws" + strings.TrimPrefix(u, "http")
+	return dialTTY(ctx, conn, nil)
+}
+
+func dialTTY(ctx context.Context, conn *Connection, client *http.Client) (*TTY, error) {
+	u, err := proxyWebSocketURL(conn, ttyPath)
+	if err != nil {
+		return nil, err
+	}
 	h := http.Header{}
 	h.Set(proxyTokenHeader, conn.Token)
 	h.Set(clientAgentHeader, ClientAgent)
-	ws, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: h})
+	ws, resp, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: h, HTTPClient: proxyWebSocketClient(client)})
 	if err != nil {
-		if resp != nil && resp.StatusCode >= 400 && resp.StatusCode <= 599 {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if resp != nil && resp.StatusCode >= 300 && resp.StatusCode <= 599 {
 			return nil, fmt.Errorf("colab: terminal: %w", &APIError{Status: resp.StatusCode, Message: http.StatusText(resp.StatusCode)})
 		}
-		return nil, fmt.Errorf("colab: terminal: %w", err)
+		return nil, fmt.Errorf("colab: terminal: %w", proxyWebSocketError(ctx, err))
 	}
 	ws.SetReadLimit(16 << 20)
 	pr, pw := io.Pipe()
@@ -198,13 +209,23 @@ const prelude = "exec env TERM=dumb PS1= PS2= HISTFILE=/dev/null bash --noeditin
 
 // OpenShell opens a terminal on the runtime and readies it for commands.
 func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
+	return openShell(ctx, conn, false)
+}
+
+// OpenShellAfterMux recovers the shared pane from a mux whose WebSocket
+// detached without ending its foreground process.
+func OpenShellAfterMux(ctx context.Context, conn *Connection) (*Shell, error) {
+	return openShell(ctx, conn, true)
+}
+
+func openShell(ctx context.Context, conn *Connection, afterMux bool) (*Shell, error) {
 	tty, err := DialTTY(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
 	s := newShell(tty)
 	go s.pump()
-	if err := tty.WriteStringContext(ctx, prelude); err != nil {
+	if err := tty.prepare(ctx, afterMux); err != nil {
 		tty.Close()
 		return nil, err
 	}
@@ -230,6 +251,23 @@ func OpenShell(ctx context.Context, conn *Connection) (*Shell, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// A mux that survived a WebSocket drop may still read the shared pane in
+// raw mode. Send its quit message before typing shell commands. If bash
+// already owns the pane, the line is discarded with the startup output.
+func (t *TTY) prepare(ctx context.Context, afterMux bool) error {
+	if afterMux {
+		if err := t.WriteStringContext(ctx, "@@COLAUNCH-MUX-QUIT@@\n"); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	return t.WriteStringContext(ctx, prelude)
 }
 
 func newShell(tty *TTY) *Shell {
@@ -495,6 +533,15 @@ func (s *Shell) upload(ctx context.Context, dst string, data []byte, private boo
 // Close closes the shell's terminal.
 func (s *Shell) Close() error { return s.tty.Close() }
 
+// Detach waits for any command using the terminal before closing it.
+func (s *Shell) Detach(ctx context.Context) error {
+	if err := lockTerminal(ctx, s.mu); err != nil {
+		return err
+	}
+	defer func() { <-s.mu }()
+	return s.Close()
+}
+
 // Done is closed once the shell's terminal is.
 func (s *Shell) Done() <-chan struct{} { return s.tty.Done() }
 
@@ -503,11 +550,21 @@ func (s *Shell) Done() <-chan struct{} { return s.tty.Done() }
 // over its input and output. The terminal's input is raw, so what is sent
 // reaches the command as it is.
 func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY, *bufio.Reader, error) {
-	tty, err := DialTTY(ctx, conn)
+	return openStream(ctx, conn, "exec "+command, ready, false, nil)
+}
+
+// StreamMux starts the fallback's mux as a child of bash. When the mux
+// receives its quit message, bash restores the pane's terminal settings.
+func StreamMux(ctx context.Context, conn *Connection, command, ready string) (*TTY, *bufio.Reader, error) {
+	return openStream(ctx, conn, command+"; stty sane -echo -onlcr", ready, true, nil)
+}
+
+func openStream(ctx context.Context, conn *Connection, command, ready string, afterMux bool, client *http.Client) (*TTY, *bufio.Reader, error) {
+	tty, err := dialTTY(ctx, conn, client)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := tty.WriteStringContext(ctx, prelude); err != nil {
+	if err := tty.prepare(ctx, afterMux); err != nil {
 		tty.Close()
 		return nil, nil, err
 	}
@@ -517,7 +574,7 @@ func Stream(ctx context.Context, conn *Connection, command, ready string) (*TTY,
 		return nil, nil, ctx.Err()
 	case <-time.After(300 * time.Millisecond):
 	}
-	if err := tty.WriteStringContext(ctx, "stty raw -echo; exec "+command+"\n"); err != nil {
+	if err := tty.WriteStringContext(ctx, "stty raw -echo; "+command+"\n"); err != nil {
 		tty.Close()
 		return nil, nil, err
 	}

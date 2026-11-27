@@ -294,7 +294,7 @@ func (p *ScriptPlugin) scriptFor(env *Env) string {
 	return b.String()
 }
 
-func (p *ScriptPlugin) Stop(ctx context.Context, sh *colab.Shell) error {
+func (p *ScriptPlugin) Stop(ctx context.Context, sh colab.Transport) error {
 	return stopPlugin(ctx, sh, p.ID())
 }
 
@@ -314,7 +314,7 @@ func deployScript(ctx context.Context, env *Env, id, script, check string, timeo
 	return waitReady(ctx, env, id, timeout, check, nonce)
 }
 
-func stopPlugin(ctx context.Context, sh *colab.Shell, id string) error {
+func stopPlugin(ctx context.Context, sh colab.Transport, id string) error {
 	return agent.StopPlugin(ctx, sh, id)
 }
 

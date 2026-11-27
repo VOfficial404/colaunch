@@ -56,12 +56,17 @@ func (m *Manager) grab(ctx context.Context, s *Session, machine Machine, vramTri
 		var last error
 	candidates:
 		for _, acc := range machine.Candidates() {
+			if err := ctx.Err(); err != nil {
+				return grabbed{}, err
+			}
 			spec := machine.Spec()
 			spec.Accelerator = acc
 			attempt++
 			n, r := attempt, round
 			m.Post(func() {
-				s.Phase, s.Attempt, s.Round, s.Spec = PhaseAssigning, n, r, spec
+				if ctx.Err() == nil {
+					s.Phase, s.Attempt, s.Round, s.Spec = PhaseAssigning, n, r, spec
+				}
 			})
 			m.logf(s, "Assigning %s (try %d)…", spec, n)
 			err := try(spec)
@@ -102,7 +107,11 @@ func (m *Manager) grab(ctx context.Context, s *Session, machine Machine, vramTri
 			return grabbed{}, fmt.Errorf("%w after %d tries in %s: %w", errGaveUp, attempt, time.Since(start).Round(time.Second), last)
 		}
 		next := time.Now().Add(interval)
-		m.Post(func() { s.Phase, s.NextTry = PhaseWaiting, next })
+		m.Post(func() {
+			if ctx.Err() == nil {
+				s.Phase, s.NextTry = PhaseWaiting, next
+			}
+		})
 		if err := grabSleep(ctx, interval); err != nil {
 			return grabbed{}, err
 		}

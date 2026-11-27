@@ -27,15 +27,15 @@ func hookDomains(t *testing.T) *domainHooks {
 		h.published = append(h.published, port)
 		return "api-tunnel-token", d.Host(), nil
 	}
-	openDomain = func(_ context.Context, _ *colab.Shell, config, token string) error {
+	openDomain = func(_ context.Context, _ colab.Transport, config, token string) error {
 		h.opened = append(h.opened, config+":"+token)
 		return nil
 	}
-	stopDomain = func(_ context.Context, _ *colab.Shell, config string) error {
+	stopDomain = func(_ context.Context, _ colab.Transport, config string) error {
 		h.stopped = append(h.stopped, config)
 		return nil
 	}
-	domainShell = func(*Manager, context.Context, *Session, *Account) (*colab.Shell, error) { return nil, nil }
+	domainShell = func(*Manager, context.Context, *Session, *Account) (colab.Transport, error) { return nil, nil }
 	t.Cleanup(func() { publishDomain, openDomain, stopDomain, domainShell = oldPub, oldOpen, oldStop, oldShell })
 	return h
 }

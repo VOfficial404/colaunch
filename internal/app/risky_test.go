@@ -29,7 +29,7 @@ func (webTask) Validate(context.Context, map[string]string, string) (*plugins.Ha
 	return nil, errors.New("test: stop here")
 }
 func (webTask) Deploy(context.Context, *plugins.Env) (*plugins.Result, error) { return nil, nil }
-func (webTask) Stop(context.Context, *colab.Shell) error                      { return nil }
+func (webTask) Stop(context.Context, colab.Transport) error                   { return nil }
 
 func click(t *testing.T, tt *ui.Tester, label string) {
 	t.Helper()

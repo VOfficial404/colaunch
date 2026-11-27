@@ -255,25 +255,6 @@ func (s *Session) dropPublicLinks() []int {
 	return ports
 }
 
-// closeShares closes tunnels on the runtime through the session's shell,
-// if it has one; a runtime given back closes them anyway.
-func (s *Session) closeShares(ports []int) {
-	if len(ports) == 0 {
-		return
-	}
-	s.mu.Lock()
-	sh := s.shell
-	s.mu.Unlock()
-	if sh == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	for _, p := range ports {
-		stopShare(ctx, sh, p)
-	}
-}
-
 // leftShares are the tunnels still running on a runtime, as after the app
 // restarted, which nothing here shows any more.
 func leftShares(st *agent.Status) []string {

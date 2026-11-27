@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,8 @@ import (
 	"colaunch/internal/colab"
 	"colaunch/internal/plugins"
 	"colaunch/internal/tunnel"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Phases of a session.
@@ -68,21 +71,32 @@ type Session struct {
 	// sentWD is the watchdog the runtime was last given, nil for none
 	// known; main thread.
 	sentWD *agent.Watchdog
+	// announceComfy waits for the first verified local ComfyUI forward.
+	announceComfy      bool
+	rebuildingForwards bool
 
 	// What goroutines use, behind mu.
 	mu sync.Mutex
 	// rid is RuntimeID for goroutines: the main thread's may lag behind.
 	rid    string
 	conn   *colab.Connection
-	shell  *colab.Shell
+	shell  colab.Transport
 	mux    *tunnel.Mux
 	fwds   []*tunnel.Forward
 	cancel context.CancelFunc
 	// dialing is the tunnel being opened, which others wait for; gen
 	// counts closeConns, so that a tunnel opened across one is dropped.
-	dialing *muxDial
-	gen     int
-	busy    sync.Mutex // one watch at a time
+	dialing       *muxDial
+	gen           int
+	stopping      bool       // normal operations may not start during release
+	busy          sync.Mutex // one watch at a time
+	transportGate chan struct{}
+	transportID   string
+	hostKey       ssh.PublicKey
+	ttyStatus     int
+	muxStarted    bool
+	lastTraffic   time.Time
+	initialized   bool
 }
 
 // muxDial is a tunnel being opened.
@@ -108,39 +122,6 @@ func (s *Session) runtimeID() string {
 type LogLine struct {
 	Time time.Time
 	Text string
-}
-
-// ForwardState is a port forwarded to 127.0.0.1.
-type ForwardState struct {
-	Port plugins.Port
-	f    *tunnel.Forward
-	Err  string
-	// Extra is a forward the user added.
-	Extra bool
-}
-
-// Address is where the forward listens, "" when it doesn't.
-func (f *ForwardState) Address() string {
-	if f.f == nil {
-		return ""
-	}
-	return f.f.Local
-}
-
-// Conns is how many connections are open through it.
-func (f *ForwardState) Conns() int {
-	if f.f == nil {
-		return 0
-	}
-	return f.f.Conns()
-}
-
-// URL is the forward's address as a link.
-func (f *ForwardState) URL() string {
-	if f.f == nil {
-		return ""
-	}
-	return "http://" + f.f.Local + f.Port.Path
 }
 
 func (s *Session) init() { s.rid = s.RuntimeID }
@@ -249,8 +230,11 @@ func (m *Manager) flushLogs() {
 	})
 }
 
-func (m *Manager) phase(s *Session, p string) {
+func (m *Manager) phase(s *Session, gen int, p string) {
 	m.Post(func() {
+		if !s.currentGeneration(gen) || s.Ended() {
+			return
+		}
 		s.Phase = p
 		if p != PhaseDeploying {
 			s.PluginPhase = ""
@@ -300,12 +284,13 @@ func (m *Manager) Launch(form DeployForm) (*Session, error) {
 	s.Grabbing = machine.Grab
 	// The active account only: Colab's terms forbid using several to get
 	// around its limits; there is no option to.
-	go m.launch(ctx, s, a, p, machine, m.Settings.MaxAttempts)
+	go m.launch(ctx, s, a, p, machine, m.Settings.MaxAttempts, s.gen)
 	return s, nil
 }
 
 func (m *Manager) fail(s *Session, a *Account, err error) {
-	if errors.Is(err, context.Canceled) {
+	gen, live := s.liveGeneration()
+	if !live || errors.Is(err, context.Canceled) || errors.Is(err, errReplaced) {
 		return
 	}
 	m.logf(s, "✗ %s", errText(err))
@@ -319,8 +304,13 @@ func (m *Manager) fail(s *Session, a *Account, err error) {
 		}
 		cancel()
 	}
-	s.closeConns()
+	if !s.closeGeneration(gen) {
+		return
+	}
 	m.Post(func() {
+		if !s.currentGeneration(gen+1) || s.Ended() || s.Phase == PhaseStopping {
+			return
+		}
 		s.Err = errText(err)
 		m.alertFailed(s, err)
 		if keep {
@@ -350,7 +340,7 @@ func (s *Session) Title() string {
 	return name
 }
 
-func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.Plugin, machine Machine, vramTries int) {
+func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.Plugin, machine Machine, vramTries, gen int) {
 	m.logf(s, "%s · %s · %s", p.Name().In(m.Lang()), s.Spec, a.Email)
 	hw, err := p.Validate(ctx, s.Values, m.HFToken())
 	if err != nil {
@@ -365,35 +355,59 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 	if s.Spec.Variant != colab.GPU {
 		minVRAM = 0
 	}
-	var sh *colab.Shell
+	var sh colab.Transport
 	var st *agent.Status
 	try := func(spec colab.Spec) error {
 		rt, err := a.Client.CreateRuntime(ctx, spec)
 		if err != nil {
 			return err
 		}
-		s.mu.Lock()
-		s.rid = rt.ID()
-		s.conn = rt.Connection
-		s.mu.Unlock()
-		m.Post(func() { s.RuntimeID = rt.ID(); m.saveState() })
-		m.logf(s, "Assigned runtime %s.", rt.ID())
+		id := rt.ID()
 		release := func() {
 			dctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			if err := a.Client.DeleteRuntime(dctx, rt.ID()); err != nil {
+			defer cancel()
+			if err := a.Client.DeleteRuntime(dctx, id); err != nil {
 				m.logf(s, "✗ %s", errText(err))
 			}
-			cancel()
 			s.mu.Lock()
-			s.rid = ""
+			if s.gen == gen && s.rid == id {
+				s.rid, s.conn = "", nil
+			}
 			s.mu.Unlock()
-			m.Post(func() { s.RuntimeID = ""; m.saveState() })
+			m.Post(func() {
+				if s.currentGeneration(gen) && s.RuntimeID == id {
+					s.RuntimeID = ""
+					m.saveState()
+				}
+			})
 		}
-		m.phase(s, PhaseConnecting)
-		sh2, st2, err := m.connect(ctx, s, rt.Connection)
+		s.mu.Lock()
+		if s.gen != gen || ctx.Err() != nil {
+			s.mu.Unlock()
+			release()
+			return context.Canceled
+		}
+		s.rid, s.conn = id, rt.Connection
+		s.mu.Unlock()
+		m.Post(func() {
+			if s.currentGeneration(gen) {
+				s.RuntimeID = id
+				m.saveState()
+			}
+		})
+		m.logf(s, "Assigned runtime %s.", id)
+		m.phase(s, gen, PhaseConnecting)
+		sh2, st2, err := m.connect(ctx, s, a, id, rt.Connection, gen)
+		if ctx.Err() != nil || !s.currentGeneration(gen) {
+			return context.Canceled // Stop owns the assigned runtime.
+		}
 		if err != nil {
 			release()
-			return fmt.Errorf("%w: %v", errConnect, err)
+			var upgrade *colab.SSHError
+			if proxyUnauthorized(err) || (errors.As(err, &upgrade) && upgrade.Status == http.StatusTooManyRequests) {
+				return err
+			}
+			return fmt.Errorf("%w: %s", errConnect, errText(err))
 		}
 		vram := st2.VRAMMB()
 		gpuName := ""
@@ -407,8 +421,10 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 			return fmt.Errorf("%w: got %s, want %s", errTooLittleVRAM, fmtGB(vram), fmtGB(minVRAM))
 		}
 		m.Post(func() {
-			s.VRAM, s.GPUName, s.Status = vram, gpuName, st2
-			m.saveState()
+			if s.currentGeneration(gen) {
+				s.VRAM, s.GPUName, s.Status = vram, gpuName, st2
+				m.saveState()
+			}
 		})
 		sh, st = sh2, st2
 		return nil
@@ -433,13 +449,13 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		m.Post(func() { m.alertGrabbed(s, got) })
 	}
 
-	m.phase(s, PhaseGuarding)
+	m.phase(s, gen, PhaseGuarding)
 	if err := m.applyWatchdog(ctx, s, a, sh); err != nil {
 		m.fail(s, a, err)
 		return
 	}
 
-	m.phase(s, PhaseDeploying)
+	m.phase(s, gen, PhaseDeploying)
 	settings := map[string]string{"llama_cuda_url": m.Settings.LlamaCUDAURL}
 	env := &plugins.Env{
 		Values:   s.Values,
@@ -450,29 +466,53 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		HFToken:  m.HFToken(),
 		Settings: settings,
 		Log:      func(f string, args ...any) { m.logf(s, f, args...) },
-		Phase:    func(p string) { m.Post(func() { s.PluginPhase = p }) },
-		Stream: func(ctx context.Context, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
-			return m.stream(ctx, s, a, command, ready)
+		Phase: func(p string) {
+			m.Post(func() {
+				if s.currentGeneration(gen) {
+					s.PluginPhase = p
+				}
+			})
+		},
+		Control: func(ctx context.Context) (colab.Transport, error) {
+			return m.shellOf(ctx, s, a)
 		},
 		ReadWaitStatus: func(ctx context.Context, plugin, nonce string) (colab.WaitStatus, error) {
 			return runtimeWaitStatus(ctx, s, a, plugin, nonce)
 		},
+	}
+	if _, ok := sh.(*colab.SSH); ok {
+		env.Stream = func(ctx context.Context, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
+			return m.stream(ctx, s, a, command, ready)
+		}
 	}
 	res, err := p.Deploy(ctx, env)
 	if err != nil {
 		m.failDeploy(ctx, s, a, err)
 		return
 	}
-	m.Post(func() { s.Result = res; m.saveState() })
-
-	m.phase(s, PhaseForwarding)
-	m.forwardAll(s, res.Ports, nil)
-	m.phase(s, PhaseRunning)
-	m.logf(s, "✓ Ready.")
+	comfy := false
+	for _, p := range res.Ports {
+		comfy = comfy || p.Kind == plugins.PortComfy
+	}
 	m.Post(func() {
-		m.Notify("success", s.Title(), s.OpenAI())
-		m.alertReady(s)
+		if s.currentGeneration(gen) {
+			s.Result, s.announceComfy = res, comfy
+			m.saveState()
+		}
 	})
+
+	m.phase(s, gen, PhaseForwarding)
+	m.forwardAll(s, a, gen, res.Ports, nil)
+	m.phase(s, gen, PhaseRunning)
+	if !comfy {
+		m.Post(func() {
+			if s.currentGeneration(gen) {
+				m.logf(s, "✓ Ready.")
+				m.Notify("success", s.Title(), s.OpenAI())
+				m.alertReady(s)
+			}
+		})
+	}
 }
 
 func orNone(name, mem string) string {
@@ -480,108 +520,6 @@ func orNone(name, mem string) string {
 		return "no GPU"
 	}
 	return name + " " + mem
-}
-
-// connect opens a shell on the runtime and puts the agent there.
-func (m *Manager) connect(ctx context.Context, s *Session, conn *colab.Connection) (*colab.Shell, *agent.Status, error) {
-	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
-	var sh *colab.Shell
-	var err error
-	// A new runtime's proxy may take a moment to answer.
-	for i := 0; i < 6; i++ {
-		sh, err = openShell(cctx, conn)
-		if err == nil {
-			break
-		}
-		select {
-		case <-cctx.Done():
-			return nil, nil, err
-		case <-time.After(5 * time.Second):
-		}
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := agent.Install(cctx, sh); err != nil {
-		sh.Close()
-		return nil, nil, err
-	}
-	st, err := agent.GetStatus(cctx, sh)
-	if err != nil {
-		sh.Close()
-		return nil, nil, err
-	}
-	s.mu.Lock()
-	old := s.shell
-	s.shell = sh
-	s.conn = conn
-	s.mu.Unlock()
-	if old != nil && old != sh {
-		old.Close()
-	}
-	return sh, st, nil
-}
-
-// openShell opens a terminal for commands; tests replace it.
-var openShell = colab.OpenShell
-
-// errReplaced means the session closed its connections, as stopping does,
-// while a new terminal was being opened.
-var errReplaced = errors.New("the session closed while a terminal was opened")
-
-const proxyRefreshBefore = 5 * time.Minute
-
-// stream starts command on a terminal of its own on the session's
-// runtime, as colab.Stream does, for a plugin to talk to the agent. It
-// refreshes credentials when they are near expiry or the cached dial
-// fails, and keeps the refreshed ones for what dials next.
-func (m *Manager) stream(ctx context.Context, s *Session, a *Account, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
-	s.mu.Lock()
-	conn, id, gen := s.conn, s.rid, s.gen
-	s.mu.Unlock()
-	if id == "" {
-		return nil, nil, errors.New("the session has no runtime")
-	}
-	var tty plugins.StreamConn
-	var r *bufio.Reader
-	var cachedErr error
-	if conn != nil && time.Until(conn.ExpireTime) > proxyRefreshBefore {
-		// Leave time in the deadline to refresh and dial again.
-		dialCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		tty, r, cachedErr = streamTTY(dialCtx, conn, command, ready)
-		cancel()
-	}
-	if tty == nil {
-		var err error
-		if conn, err = runtimeConnection(ctx, a.Client, id); err != nil {
-			return nil, nil, errors.Join(cachedErr, err)
-		}
-		if tty, r, err = streamTTY(ctx, conn, command, ready); err != nil {
-			return nil, nil, errors.Join(cachedErr, err)
-		}
-	}
-	s.mu.Lock()
-	if s.gen != gen || s.rid != id || ctx.Err() != nil {
-		s.mu.Unlock()
-		tty.Close()
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		return nil, nil, errReplaced
-	}
-	s.conn = conn
-	s.mu.Unlock()
-	return tty, r, nil
-}
-
-// streamTTY starts a command on a terminal of its own; tests replace it.
-var streamTTY = func(ctx context.Context, conn *colab.Connection, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
-	tty, r, err := colab.Stream(ctx, conn, command, ready)
-	if err != nil {
-		return nil, nil, err
-	}
-	return tty, r, nil
 }
 
 // watchdogFor computes the runtime's limits: the schedule, and the time
@@ -608,7 +546,7 @@ func watchdogFor(s *sessionRecord, q *colab.Quota, now time.Time) agent.Watchdog
 	return w
 }
 
-func (m *Manager) applyWatchdog(ctx context.Context, s *Session, a *Account, sh *colab.Shell) error {
+func (m *Manager) applyWatchdog(ctx context.Context, s *Session, a *Account, sh colab.Transport) error {
 	var w agent.Watchdog
 	var guarded bool
 	done := make(chan struct{})
@@ -670,15 +608,13 @@ func (m *Manager) checkBalance(a *Account) {
 			}
 			s.sentWD = &w
 			go func() {
-				s.mu.Lock()
-				sh := s.shell
-				s.mu.Unlock()
-				if sh == nil {
+				ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
+				defer cancel()
+				sh, err := m.shellOf(ctx, s, a)
+				if err != nil {
 					m.peek(func() { s.sentWD = nil })
 					return
 				}
-				ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
-				defer cancel()
 				if agent.SetWatchdog(ctx, sh, w) != nil {
 					m.peek(func() { s.sentWD = nil })
 				}
@@ -712,16 +648,38 @@ func (m *Manager) Stop(s *Session, reason string) {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	id := s.rid
+	s.stopping = true
+	s.gen++
+	gen, id := s.gen, s.rid
+	fwds, mux, dialing := s.fwds, s.mux, s.dialing
+	s.fwds = nil
 	s.mu.Unlock()
+	s.Forwards, s.rebuildingForwards = nil, false
 	shares := s.dropPublicLinks()
 	domains := s.dropDomainLinks()
 	go func() {
-		// Should giving the runtime back fail, no tunnel stays open
-		// that the view no longer shows.
-		s.closeShares(shares)
-		s.closeDomains(domains)
-		s.closeConns()
+		if dialing != nil {
+			dialing.cancel()
+		}
+		if mux != nil {
+			mux.Close()
+		}
+		for _, f := range fwds {
+			f.Close()
+		}
+		if a != nil && len(shares)+len(domains) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if sh, err := m.shellOfGeneration(ctx, s, a, gen); err == nil {
+				for _, port := range shares {
+					stopShare(ctx, sh, port)
+				}
+				for _, config := range domains {
+					stopDomain(ctx, sh, config)
+				}
+			}
+			cancel()
+		}
+		s.closeGeneration(gen)
 		var err error
 		if id != "" && a != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -730,14 +688,20 @@ func (m *Manager) Stop(s *Session, reason string) {
 		}
 		m.Post(func() {
 			if err != nil {
-				s.Phase = PhaseRunning
+				s.mu.Lock()
+				s.stopping = false
+				gen := s.gen
+				s.mu.Unlock()
+				s.RuntimeID = id
+				s.Phase, s.StopReason = PhaseRunning, ""
 				s.Err = errText(err)
+				m.saveState()
 				m.Notify("error", s.Title(), s.Err)
+				m.restoreForwards(s, a, gen)
 				return
 			}
 			s.Phase = PhaseStopped
 			s.StoppedAt = time.Now()
-			s.Forwards = nil
 			m.saveState()
 			m.Notify("info", s.Title(), "")
 			// A session stopped before it had a runtime stopped nothing
@@ -756,7 +720,17 @@ func (m *Manager) Stop(s *Session, reason string) {
 // tunnel being opened, if one is. What may wait on the network is done
 // without mu.
 func (s *Session) closeConns() {
+	s.closeGeneration(-1)
+}
+
+// closeGeneration takes the specified generation out of service. A negative
+// generation closes whichever resources are current, as on app shutdown.
+func (s *Session) closeGeneration(gen int) bool {
 	s.mu.Lock()
+	if gen >= 0 && s.gen != gen {
+		s.mu.Unlock()
+		return false
+	}
 	fwds, mux, sh, d := s.fwds, s.mux, s.shell, s.dialing
 	s.fwds, s.mux, s.shell, s.dialing = nil, nil, nil, nil
 	s.gen++
@@ -774,17 +748,23 @@ func (s *Session) closeConns() {
 	if sh != nil {
 		sh.Close()
 	}
+	return true
 }
 
 // dialMux returns the session's tunnel, opening it if it isn't open. It
 // doesn't hold mu while it dials, and callers at the same time share one
 // dial.
-func (s *Session) dialMux() (*tunnel.Mux, error) {
+func (s *Session) dialMux(ctx context.Context, gen int) (*tunnel.Mux, error) {
 	s.mu.Lock()
+	if s.gen != gen || ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, errReplaced
+	}
+	var closedMux *tunnel.Mux
 	if s.mux != nil {
 		select {
 		case <-s.mux.Done():
-			s.mux = nil
+			closedMux, s.mux = s.mux, nil
 		default:
 			m := s.mux
 			s.mu.Unlock()
@@ -793,20 +773,27 @@ func (s *Session) dialMux() (*tunnel.Mux, error) {
 	}
 	if d := s.dialing; d != nil {
 		s.mu.Unlock()
-		<-d.done
-		return d.mux, d.err
+		select {
+		case <-d.done:
+			return d.mux, d.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	conn := s.conn
 	if conn == nil {
 		s.mu.Unlock()
 		return nil, errors.New("not connected")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithCancel(ctx)
 	d := &muxDial{done: make(chan struct{}), cancel: cancel}
 	s.dialing = d
-	gen := s.gen
+	s.muxStarted = true
 	s.mu.Unlock()
 
+	if closedMux != nil {
+		closedMux.Close()
+	}
 	tty, r, err := streamMux(ctx, conn)
 	cancel()
 	var mux *tunnel.Mux
@@ -835,78 +822,11 @@ func (s *Session) dialMux() (*tunnel.Mux, error) {
 
 // streamMux starts the agent's mux on a terminal; tests replace it.
 var streamMux = func(ctx context.Context, conn *colab.Connection) (tunnel.Transport, *bufio.Reader, error) {
-	tty, r, err := colab.Stream(ctx, conn, agent.MuxCommand, agent.MuxReady)
+	tty, r, err := colab.StreamMux(ctx, conn, agent.MuxCommand, agent.MuxReady)
 	if err != nil {
 		return nil, nil, err
 	}
 	return tty, r, nil
-}
-
-// forwardAll forwards ports of the runtime to 127.0.0.1, falling back to
-// any free port when one is taken.
-func (m *Manager) forwardAll(s *Session, ports, extra []plugins.Port) {
-	var states []*ForwardState
-	for i, p := range append(append([]plugins.Port(nil), ports...), extra...) {
-		fs := &ForwardState{Port: p, Extra: i >= len(ports)}
-		local := fmt.Sprintf("127.0.0.1:%d", p.Local)
-		f, err := tunnel.Listen(local, p.Remote, s.dialMux)
-		if err != nil {
-			m.logf(s, "Port %d is taken here; using another.", p.Local)
-			f, err = tunnel.Listen("127.0.0.1:0", p.Remote, s.dialMux)
-		}
-		if err != nil {
-			fs.Err = err.Error()
-		} else {
-			fs.f = f
-			s.mu.Lock()
-			s.fwds = append(s.fwds, f)
-			s.mu.Unlock()
-			m.logf(s, "Forwarding %s → runtime:%d (%s)", f.Local, p.Remote, p.Name)
-		}
-		states = append(states, fs)
-	}
-	m.Post(func() { s.Forwards = append(s.Forwards, states...) })
-	// Open the tunnel now, so the first request doesn't wait for it.
-	go s.dialMux()
-}
-
-// AddForward forwards another port of a running session's runtime.
-func (m *Manager) AddForward(s *Session, remote, local int, name string) {
-	p := plugins.Port{Name: name, Remote: remote, Local: local, Kind: plugins.PortTCP}
-	if name == "" {
-		p.Name = fmt.Sprintf("port %d", remote)
-	}
-	s.Extra = append(s.Extra, p)
-	m.saveState()
-	go m.forwardAll(s, nil, []plugins.Port{p})
-}
-
-// RemoveForward stops a forward the user added.
-func (m *Manager) RemoveForward(s *Session, f *ForwardState) {
-	if f.f != nil {
-		s.mu.Lock()
-		for i, x := range s.fwds {
-			if x == f.f {
-				s.fwds = append(s.fwds[:i], s.fwds[i+1:]...)
-				break
-			}
-		}
-		s.mu.Unlock()
-		f.f.Close()
-	}
-	for i, x := range s.Forwards {
-		if x == f {
-			s.Forwards = append(s.Forwards[:i], s.Forwards[i+1:]...)
-			break
-		}
-	}
-	for i, p := range s.Extra {
-		if p == f.Port {
-			s.Extra = append(s.Extra[:i], s.Extra[i+1:]...)
-			break
-		}
-	}
-	m.saveState()
 }
 
 func runtimeConnection(ctx context.Context, client *colab.Client, id string) (*colab.Connection, error) {
@@ -920,41 +840,6 @@ func runtimeConnection(ctx context.Context, client *colab.Client, id string) (*c
 	return rt.Connection, nil
 }
 
-// shellOf returns the session's shell, opening one with a fresh connection
-// when it has none or its connection is about to expire.
-func (m *Manager) shellOf(ctx context.Context, s *Session, a *Account) (*colab.Shell, error) {
-	s.mu.Lock()
-	sh, conn, id := s.shell, s.conn, s.rid
-	s.mu.Unlock()
-	if sh != nil && conn != nil && time.Until(conn.ExpireTime) > proxyRefreshBefore {
-		select {
-		case <-sh.Done():
-		default:
-			return sh, nil
-		}
-	}
-	if id == "" {
-		return nil, errors.New("the session has no runtime")
-	}
-	conn, err := runtimeConnection(ctx, a.Client, id)
-	if err != nil {
-		return nil, err
-	}
-	if sh != nil {
-		select {
-		case <-sh.Done():
-		default:
-			// Still open: keep it, with the new token for what dials next.
-			s.mu.Lock()
-			s.conn = conn
-			s.mu.Unlock()
-			return sh, nil
-		}
-	}
-	sh, _, err = m.connect(ctx, s, conn)
-	return sh, err
-}
-
 // watch looks at a running session's runtime, of account a: is it still
 // there, what does it use, did its watchdog stop it.
 func (m *Manager) watch(s *Session, a *Account) {
@@ -962,11 +847,15 @@ func (m *Manager) watch(s *Session, a *Account) {
 		return
 	}
 	defer s.busy.Unlock()
+	gen, live := s.liveGeneration()
+	if !live {
+		return
+	}
 	ctx, cancel := context.WithTimeout(m.ctx, 90*time.Second)
 	defer cancel()
-	sh, err := m.shellOf(ctx, s, a)
+	sh, err := m.shellOfGeneration(ctx, s, a, gen)
 	if errors.Is(err, colab.ErrNotFound) {
-		m.gone(s)
+		m.gone(s, gen)
 		return
 	}
 	if err != nil {
@@ -977,24 +866,31 @@ func (m *Manager) watch(s *Session, a *Account) {
 		return
 	}
 	m.Post(func() {
-		s.Status = st
-		s.Err = ""
-		// Reconnecting after a restart failed before its forwards: make
-		// them now that the runtime answers.
-		if len(s.Forwards) == 0 && s.Result != nil && len(s.Result.Ports)+len(s.Extra) > 0 {
-			go m.forwardAll(s, s.Result.Ports, s.Extra)
+		if !s.currentGeneration(gen) || s.Phase != PhaseRunning {
+			return
 		}
+		s.Status, s.Err = st, ""
+		m.restoreForwards(s, a, gen)
 	})
 }
 
 // gone marks a session whose runtime no longer exists.
-func (m *Manager) gone(s *Session) {
-	s.closeConns()
+func (m *Manager) gone(s *Session, gen int) {
 	m.Post(func() {
-		if s.Ended() {
+		if s.Ended() || s.Phase == PhaseStopping {
 			return
 		}
+		s.mu.Lock()
+		if s.gen != gen {
+			s.mu.Unlock()
+			return
+		}
+		s.stopping = true
+		s.gen++
+		closingGen := s.gen
+		s.mu.Unlock()
 		s.Phase = PhaseStopped
+		go s.closeGeneration(closingGen)
 		s.StoppedAt = time.Now()
 		s.StopReason = "gone"
 		s.dropPublicLinks()
@@ -1014,25 +910,37 @@ func (m *Manager) gone(s *Session) {
 // reattach finds a kept session's runtime after the app restarted, and
 // forwards its ports again.
 func (m *Manager) reattach(s *Session, a *Account) {
+	gen, live := s.liveGeneration()
+	if !live {
+		return
+	}
 	id := s.runtimeID()
 	if a == nil || id == "" {
-		m.Post(func() { s.Phase = PhaseStopped; s.StopReason = "gone"; m.saveState() })
+		m.gone(s, gen)
 		return
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
 	defer cancel()
-	rt, err := a.Client.Runtime(ctx, id)
+	conn, err := runtimeConnection(ctx, a.Client, id)
 	if errors.Is(err, colab.ErrNotFound) {
-		m.gone(s)
+		m.gone(s, gen)
 		return
 	}
-	if err != nil || rt.Connection == nil {
-		m.Post(func() { s.Phase = PhaseRunning; s.Err = errText(err) })
-		return
-	}
-	sh, st, err := m.connect(ctx, s, rt.Connection)
 	if err != nil {
-		m.Post(func() { s.Phase = PhaseRunning; s.Err = errText(err) })
+		m.Post(func() {
+			if s.currentGeneration(gen) && s.Phase == PhaseReattaching {
+				s.Phase, s.Err = PhaseRunning, errText(err)
+			}
+		})
+		return
+	}
+	sh, st, err := m.connect(ctx, s, a, id, conn, gen)
+	if err != nil {
+		m.Post(func() {
+			if s.currentGeneration(gen) && s.Phase == PhaseReattaching {
+				s.Phase, s.Err = PhaseRunning, errText(err)
+			}
+		})
 		return
 	}
 	// Public links and domains aren't kept: close those the app had
@@ -1042,24 +950,14 @@ func (m *Manager) reattach(s *Session, a *Account) {
 			m.logf(s, "Closed a public link left from before the restart (%s).", id)
 		}
 	}
-	var ports, extra []plugins.Port
-	done := make(chan struct{})
 	m.Post(func() {
-		s.Status, s.Err = st, ""
-		if s.Result != nil {
-			ports = s.Result.Ports
+		if !s.currentGeneration(gen) || s.Phase != PhaseReattaching {
+			return
 		}
-		extra = append(extra, s.Extra...)
-		close(done)
+		s.Status, s.Err, s.Phase = st, "", PhaseRunning
+		m.restoreForwards(s, a, gen)
+		m.logf(s, "Reconnected to runtime %s.", id)
 	})
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return
-	}
-	m.forwardAll(s, ports, extra)
-	m.phase(s, PhaseRunning)
-	m.logf(s, "Reconnected to runtime %s.", id)
 }
 
 // UpdateGuards changes a running session's limits, on the runtime too.

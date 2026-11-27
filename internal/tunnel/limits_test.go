@@ -162,7 +162,7 @@ func TestStalledStreamCloses(t *testing.T) {
 func TestHalfClose(t *testing.T) {
 	setLimits(t, 4<<20, time.Second, 5*time.Second)
 	m, a := fakeMux(t, time.Hour)
-	f, err := Listen("127.0.0.1:0", 80, func() (*Mux, error) { return m, nil })
+	f, err := Listen("127.0.0.1:0", 80, m, ForwardOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestHalfClose(t *testing.T) {
 // Closing a forward closes the connections it carries.
 func TestForwardCloseClosesConns(t *testing.T) {
 	m, a := fakeMux(t, time.Hour)
-	f, err := Listen("127.0.0.1:0", 80, func() (*Mux, error) { return m, nil })
+	f, err := Listen("127.0.0.1:0", 80, m, ForwardOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestMuxIdle(t *testing.T) {
 func TestHalfCloseThroughAgent(t *testing.T) {
 	setLimits(t, 4<<20, time.Second, 500*time.Millisecond)
 	m := startMux(t)
-	f, err := Listen("127.0.0.1:0", echoServer(t), func() (*Mux, error) { return m, nil })
+	f, err := Listen("127.0.0.1:0", echoServer(t), m, ForwardOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,11 +1,11 @@
-// Package tunnel carries TCP connections from 127.0.0.1 on this machine to
-// ports of a runtime, over the lines of text the agent's mux reads and
-// writes on a terminal of the runtime (see agent.py, class Mux).
+// Package tunnel forwards local TCP connections to ports on a runtime.
+// Mux implements the legacy terminal protocol used by agent.py.
 package tunnel
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -225,6 +225,19 @@ func (m *Mux) handle(line string) {
 
 // Dial opens a connection to a port of the runtime, on its 127.0.0.1.
 func (m *Mux) Dial(port int) (*Stream, error) {
+	return m.dial(context.Background(), port)
+}
+
+// DialPort implements ForwardDialer for the legacy terminal mux.
+func (m *Mux) DialPort(ctx context.Context, port int) (io.ReadWriteCloser, error) {
+	s, err := m.dial(ctx, port)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (m *Mux) dial(ctx context.Context, port int) (*Stream, error) {
 	id := strconv.FormatUint(m.next.Add(1), 36)
 	s := &Stream{m: m, id: id, opened: make(chan error, 1)}
 	s.cond = sync.NewCond(&s.mu)
@@ -247,6 +260,9 @@ func (m *Mux) Dial(port int) (*Stream, error) {
 		return s, nil
 	case <-m.done:
 		return nil, m.Err()
+	case <-ctx.Done():
+		s.Close()
+		return nil, ctx.Err()
 	case <-time.After(30 * time.Second):
 		s.Close()
 		return nil, errors.New("tunnel: the runtime didn't answer")
@@ -414,6 +430,25 @@ func (s *Stream) remoteGone() bool {
 	return s.gone
 }
 
+// ForwardDialer opens a new stream for each accepted local connection.
+type ForwardDialer interface {
+	DialPort(context.Context, int) (io.ReadWriteCloser, error)
+}
+
+// ForwardDialFunc adapts a function to ForwardDialer.
+type ForwardDialFunc func(context.Context, int) (io.ReadWriteCloser, error)
+
+func (f ForwardDialFunc) DialPort(ctx context.Context, port int) (io.ReadWriteCloser, error) {
+	return f(ctx, port)
+}
+
+// ForwardOptions reports dial failures and traffic to the owner.
+type ForwardOptions struct {
+	OnDialError func(error)
+	OnTraffic   func()
+	DialTimeout time.Duration // zero uses one minute
+}
+
 // Forward is a port of this machine forwarded to one of the runtime.
 type Forward struct {
 	Local  string // as 127.0.0.1:8080
@@ -421,16 +456,26 @@ type Forward struct {
 	ln     net.Listener
 	conns  atomic.Int32
 
-	mu     sync.Mutex
-	open   map[net.Conn]*Stream
-	closed bool
+	mu            sync.Mutex
+	open          map[net.Conn]io.ReadWriteCloser
+	closed        bool
+	lastDialError error
+	cancel        context.CancelFunc
 }
 
 // Conns is how many connections are open.
 func (f *Forward) Conns() int { return int(f.conns.Load()) }
 
+// LastDialError is the most recent dial failure, cleared on a successful dial.
+func (f *Forward) LastDialError() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastDialError
+}
+
 // Close stops listening, and closes the connections open.
 func (f *Forward) Close() error {
+	f.cancel()
 	err := f.ln.Close()
 	f.mu.Lock()
 	f.closed = true
@@ -448,7 +493,7 @@ func (f *Forward) Close() error {
 
 // track keeps a connection, with its stream once dialed, for Close; false
 // once the forward is closed.
-func (f *Forward) track(c net.Conn, s *Stream) bool {
+func (f *Forward) track(c net.Conn, s io.ReadWriteCloser) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
@@ -464,10 +509,9 @@ func (f *Forward) untrack(c net.Conn) {
 	f.mu.Unlock()
 }
 
-// Listen forwards local, as "127.0.0.1:8080" or ":0" for any port, to port
-// remote of the runtime, until the forward or the mux closes. dial returns
-// the mux to use, which may change as the app reconnects.
-func Listen(local string, remote int, dial func() (*Mux, error)) (*Forward, error) {
+// Listen forwards local to the runtime's port until the listener closes.
+// Each incoming connection dials through the current remote transport.
+func Listen(local string, remote int, dial ForwardDialer, opts ForwardOptions) (*Forward, error) {
 	if !strings.Contains(local, ":") {
 		local = "127.0.0.1:" + local
 	}
@@ -478,31 +522,44 @@ func Listen(local string, remote int, dial func() (*Mux, error)) (*Forward, erro
 	if err != nil {
 		return nil, err
 	}
-	f := &Forward{Local: ln.Addr().String(), Remote: remote, ln: ln, open: map[net.Conn]*Stream{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &Forward{Local: ln.Addr().String(), Remote: remote, ln: ln, open: map[net.Conn]io.ReadWriteCloser{}, cancel: cancel}
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go f.serve(c, dial)
+			go f.serve(ctx, c, dial, opts)
 		}
 	}()
 	return f, nil
 }
 
-func (f *Forward) serve(c net.Conn, dial func() (*Mux, error)) {
+func (f *Forward) serve(ctx context.Context, c net.Conn, dial ForwardDialer, opts ForwardOptions) {
 	defer c.Close()
 	if !f.track(c, nil) {
 		return
 	}
 	defer f.untrack(c)
-	m, err := dial()
-	if err != nil {
-		return
+	timeout := opts.DialTimeout
+	if timeout == 0 {
+		timeout = time.Minute
 	}
-	s, err := m.Dial(f.Remote)
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	s, err := dial.DialPort(dialCtx, f.Remote)
+	cancel()
+	f.mu.Lock()
+	var notify bool
+	if ctx.Err() == nil {
+		notify = err != nil && (f.lastDialError == nil || f.lastDialError.Error() != err.Error())
+		f.lastDialError = err
+	}
+	f.mu.Unlock()
 	if err != nil {
+		if notify && opts.OnDialError != nil {
+			opts.OnDialError(err)
+		}
 		return
 	}
 	defer s.Close()
@@ -550,6 +607,9 @@ func (f *Forward) serve(c net.Conn, dial func() (*Mux, error)) {
 					done <- false
 					return
 				}
+				if opts.OnTraffic != nil {
+					opts.OnTraffic()
+				}
 			}
 			if err != nil {
 				break
@@ -559,7 +619,12 @@ func (f *Forward) serve(c net.Conn, dial func() (*Mux, error)) {
 			done <- false
 			return
 		}
-		s.CloseWrite()
+		cw, ok := s.(interface{ CloseWrite() error })
+		if !ok {
+			done <- false
+			return
+		}
+		cw.CloseWrite()
 		done <- true
 	}()
 	go func() {
@@ -575,13 +640,21 @@ func (f *Forward) serve(c net.Conn, dial func() (*Mux, error)) {
 					done <- false
 					return
 				}
+				if opts.OnTraffic != nil {
+					opts.OnTraffic()
+				}
 			}
 			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					done <- false
+					return
+				}
 				break
 			}
 		}
 		cw, ok := c.(interface{ CloseWrite() error })
-		if s.remoteGone() || !ok {
+		legacy, isLegacy := s.(*Stream)
+		if !ok || (isLegacy && legacy.remoteGone()) {
 			done <- false
 			return
 		}

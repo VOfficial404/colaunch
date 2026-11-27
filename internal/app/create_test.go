@@ -120,6 +120,7 @@ type fakeComfy struct {
 	hold        bool
 	family      string
 	prompts     []string
+	uploads     []comfy.InputImage
 	interrupted chan struct{}
 	done        bool
 }
@@ -136,6 +137,23 @@ func newFakeComfy(t *testing.T, hold bool) *fakeComfy {
 	})
 	mux.HandleFunc("/queue", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"queue_running":[],"queue_pending":[]}`))
+	})
+	mux.HandleFunc("/upload/image", func(w http.ResponseWriter, r *http.Request) {
+		f, header, err := r.FormFile("image")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer f.Close()
+		data, err := io.ReadAll(f)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		fc.mu.Lock()
+		fc.uploads = append(fc.uploads, comfy.InputImage{Filename: header.Filename, Data: data})
+		fc.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"name": header.Filename, "type": r.FormValue("type"), "subfolder": ""})
 	})
 	mux.HandleFunc("/prompt", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

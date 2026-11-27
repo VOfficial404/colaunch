@@ -274,7 +274,7 @@ func (m *Manager) runtimeNotices(s *Session) agent.Notices {
 
 // applyNotices gives the session's runtime the notices to send as it
 // stops; a failure only goes to the log.
-func (m *Manager) applyNotices(ctx context.Context, s *Session, sh *colab.Shell) {
+func (m *Manager) applyNotices(ctx context.Context, s *Session, sh colab.Transport) {
 	var n agent.Notices
 	done := make(chan struct{})
 	m.peek(func() {
@@ -299,19 +299,16 @@ func (m *Manager) applyNotices(ctx context.Context, s *Session, sh *colab.Shell)
 // settings are now. Main thread.
 func (m *Manager) pushNotices() {
 	for _, s := range m.Sessions {
-		if s.Phase != PhaseRunning {
-			continue
-		}
-		s.mu.Lock()
-		sh := s.shell
-		s.mu.Unlock()
-		if sh == nil {
+		a := m.Account(s.Account)
+		if s.Phase != PhaseRunning || a == nil {
 			continue
 		}
 		go func() {
 			ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
 			defer cancel()
-			m.applyNotices(ctx, s, sh)
+			if sh, err := m.shellOf(ctx, s, a); err == nil {
+				m.applyNotices(ctx, s, sh)
+			}
 		}()
 	}
 }

@@ -24,7 +24,7 @@ func (webPlugin) Validate(context.Context, map[string]string, string) (*plugins.
 	return nil, errors.New("test: stop here")
 }
 func (webPlugin) Deploy(context.Context, *plugins.Env) (*plugins.Result, error) { return nil, nil }
-func (webPlugin) Stop(context.Context, *colab.Shell) error                      { return nil }
+func (webPlugin) Stop(context.Context, colab.Transport) error                   { return nil }
 
 func register(t *testing.T, p plugins.Plugin) {
 	if err := plugins.Register(p); err != nil {
@@ -111,7 +111,7 @@ func TestPublicLinkRefused(t *testing.T) {
 	m := managerWith(t, &colab.Quota{Tier: "PRO", Balance: 50})
 	opened := 0
 	old := openShare
-	openShare = func(context.Context, *colab.Shell, int) (string, error) {
+	openShare = func(context.Context, colab.Transport, int) (string, error) {
 		opened++
 		return "https://x.trycloudflare.com", nil
 	}

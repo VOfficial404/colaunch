@@ -9,6 +9,7 @@ import (
 
 	"colaunch/internal/core"
 	"colaunch/internal/i18n"
+	"colaunch/internal/plugins"
 )
 
 type portsState struct {
@@ -22,6 +23,26 @@ type portsState struct {
 	// hidden are forwards removed, until the toast that can undo it
 	// closes.
 	hidden map[*core.ForwardState]bool
+}
+
+func (a *App) forwardHealth(c *ui.Context, s *core.Session, f *core.ForwardState) {
+	t := c.Theme()
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
+		switch {
+		case f.Checking:
+			ui.Text(c, i18n.T("forward.checking")).TextColor(t.TextMuted).FontSize(12)
+		case f.Address() != "":
+			ui.Text(c, i18n.T("forward.verified")).TextColor(t.Success).FontSize(12)
+		default:
+			ui.Text(c, i18n.T("forward.unavailable")).TextColor(t.Warning).FontSize(12)
+			if f.CheckErr != "" {
+				ui.Text(c, shortError(f.CheckErr)).TextColor(t.Warning).FontSize(12).Selectable().Tooltip(f.CheckErr)
+			}
+		}
+		if !f.Checking && s.Phase == core.PhaseRunning && ui.Button(c, i18n.T("forward.retry")).Clicked() {
+			a.m.RetryForward(s, f)
+		}
+	})
 }
 
 // parsePort reads a port number typed into a field: ok false when it
@@ -78,13 +99,18 @@ func (a *App) portsPage(c *ui.Context) {
 						if f.Err != "" {
 							ui.Text(c, f.Err).TextColor(t.Danger).Grow(1)
 						} else {
-							ui.Text(c, i18n.F("ports.mapping", f.Address(), f.Port.Remote)).Font("monospace").FontSize(13).Selectable().Grow(1)
-							ui.Text(c, i18n.F("ports.conns", f.Conns())).FontSize(12).TextColor(t.TextMuted)
-							if iconButton(c, iconCopy, i18n.T("copy")).Clicked() {
-								a.copyText(f.Address())
+							ui.Text(c, i18n.F("ports.mapping", f.ListeningAddress(), f.Port.Remote)).Font("monospace").FontSize(13).Selectable().Grow(1)
+							if f.Port.Kind == plugins.PortComfy {
+								a.forwardHealth(c.Key("health"), s, f)
 							}
-							if iconButton(c, iconExternal, i18n.T("open")).Clicked() {
-								openURL(f.URL())
+							if f.Address() != "" {
+								ui.Text(c, i18n.F("ports.conns", f.Conns())).FontSize(12).TextColor(t.TextMuted)
+								if iconButton(c, iconCopy, i18n.T("copy")).Clicked() {
+									a.copyText(f.Address())
+								}
+								if iconButton(c, iconExternal, i18n.T("open")).Clicked() {
+									openURL(f.URL())
+								}
 							}
 						}
 						if f.Extra {

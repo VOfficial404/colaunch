@@ -92,7 +92,7 @@ func ParseDomain(log, mark string) DomainState {
 // runtime with token, and returns once it has registered a connection with
 // Cloudflare. The token goes to a file of the plugin's private folder,
 // readable by its owner alone; stopping the plugin removes it.
-func OpenDomain(ctx context.Context, sh *colab.Shell, config, token string) error {
+func OpenDomain(ctx context.Context, sh colab.Transport, config, token string) error {
 	if !configID.MatchString(config) {
 		return fmt.Errorf("domain: bad configuration ID %q", config)
 	}
@@ -163,6 +163,6 @@ func waitDomain(ctx context.Context, logs func(context.Context) (string, error),
 
 // StopDomain stops the tunnel of a domain configuration, and removes its
 // token from the runtime.
-func StopDomain(ctx context.Context, sh *colab.Shell, config string) error {
+func StopDomain(ctx context.Context, sh colab.Transport, config string) error {
 	return StopPlugin(ctx, sh, DomainID(config))
 }

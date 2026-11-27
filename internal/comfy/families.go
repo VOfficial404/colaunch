@@ -25,6 +25,8 @@ type Params struct {
 	Steps            int
 	CFG              float64
 	Seed             int64
+	// Denoise applies to image-to-image. Zero uses DefaultDenoise.
+	Denoise float64
 	// Frames and FPS are a video's; Count is how many to make at once.
 	Frames, FPS, Count int
 }
@@ -74,7 +76,20 @@ type Family struct {
 	// MaxFrames is the most frames a video may have, 0 for images.
 	MaxFrames int
 
-	build func(m Models, p Params) *Graph
+	build func(m Models, p Params, inputImage string) *Graph
+}
+
+// SupportsInputImage reports whether the family can start from a still image.
+func (f *Family) SupportsInputImage() bool {
+	if f == nil || f.build == nil {
+		return false
+	}
+	switch f.ID {
+	case "qwen-image", "qwen-image-2.1", "qwen-image-2.1-turbo", "flux1-dev", "flux1-schnell", "z-image", "z-image-turbo", "wan22-ti2v-5b":
+		return true
+	default:
+		return false
+	}
 }
 
 // Models are the names of the files a workflow loads, as ComfyUI's
@@ -293,8 +308,8 @@ func qwen21Family(turbo bool) *Family {
 		Files:    []File{qwen21TextEncoder, qwen21VAE},
 		Overhead: 2 * gib,
 		Step:     16,
-		build: func(m Models, p Params) *Graph {
-			return buildQwen21(m, p, id, turbo)
+		build: func(m Models, p Params, inputImage string) *Graph {
+			return buildQwen21(m, p, inputImage, id, turbo)
 		},
 	}
 }

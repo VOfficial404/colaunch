@@ -2,6 +2,12 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.16]
+
+- Use Colab SSH for commands, uploads, deployment monitoring, and local port forwarding. Local listeners reconnect on new requests if SSH drops.
+- Use the Colab terminal on runtimes without SSH. Verify the local ComfyUI endpoint before showing it as ready, and show connection errors with a retry action.
+- Select, preview, replace, and remove an input image in Create. Use denoise strength for image-to-image, or use the image as the first frame with Wan 2.2 5B.
+
 ## [0.1.15]
 
 - Continue monitoring a deployment through the runtime file API when terminal connections fail. The installer and its status writer stay on the assigned GPU. Colaunch checks both Contents paths for files under `/content`.

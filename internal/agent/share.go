@@ -94,7 +94,7 @@ func ParseShare(log, mark string) ShareState {
 
 // OpenShare makes port reachable from the internet through a Cloudflare
 // quick tunnel, and returns its https://….trycloudflare.com address.
-func OpenShare(ctx context.Context, sh *colab.Shell, port int) (string, error) {
+func OpenShare(ctx context.Context, sh colab.Transport, port int) (string, error) {
 	b := make([]byte, 8)
 	rand.Read(b)
 	mark := hex.EncodeToString(b)
@@ -148,6 +148,6 @@ func waitShare(ctx context.Context, logs func(context.Context) (string, error), 
 }
 
 // StopShare closes the public link to port.
-func StopShare(ctx context.Context, sh *colab.Shell, port int) error {
+func StopShare(ctx context.Context, sh colab.Transport, port int) error {
 	return StopPlugin(ctx, sh, ShareID(port))
 }

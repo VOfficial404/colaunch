@@ -31,6 +31,10 @@ Both Qwen-Image 2.1 families use the public Comfy-Org Qwen3-VL 8B W4A8 encoder (
 - **ComfyUI web page.** In **Runtimes**, open the ready runtime and click **Open** beside the ComfyUI endpoint. The forwarded address is normally `http://127.0.0.1:8188`. In ComfyUI's **Workflows** sidebar, open `colaunch-<family>.json`, edit the prompt and queue a run. The loaders already point to the deployed model and companions.
 - **Create page.** Click **Create** on the runtime or use **Create** in the sidebar. Pick a running ComfyUI runtime, enter a prompt, adjust the size and generation settings, and click **Generate**. For video, set frames and FPS. You can monitor or stop the current generation, preview results, copy a prompt, or generate again with the same settings. Save or share results you want to keep before quitting Colaunch.
 
+### Use an input image
+
+In **Create**, choose a PNG, JPEG, or WebP up to 20 MiB. Click **Generate** to upload it to the selected Colab runtime. Qwen‑Image, FLUX.1, and Z‑Image use the image as a starting point and center-crop it to the selected aspect ratio. Set **Denoise strength** lower to retain more of the original image or higher for a stronger redraw. Wan 2.2 5B uses the image as the video’s first frame. Wan 2.1 T2V uses a text prompt alone.
+
 ## Colab usage rules
 
 Colab may terminate a free managed runtime without warning when you bypass the notebook UI and primarily use a web UI such as ComfyUI for content generation. Google says the free-tier web UI restriction can be lifted with a paid plan and a positive compute-unit balance. Colab prohibits creating deepfakes on all managed runtimes. Get consent before generating images or videos of real people. [Google Colab FAQ](https://research.google.com/colaboratory/faq.html#disallowed-activities)
@@ -45,5 +49,7 @@ Colab may terminate a free managed runtime without warning when you bypass the n
 
 - 要进入 **ComfyUI 网页**，在「运行时」打开已就绪的运行时，点击 ComfyUI 地址旁的「打开」。默认地址是 `http://127.0.0.1:8188`。从网页侧栏的 **Workflows** 打开 `colaunch-<家族>.json`，修改提示词后排队生成。工作流已选好部署的模型和配套文件。
 - 要进入 **创作页**，点运行时卡片上的「去创作」或侧栏「创作」。选择运行时，填写提示词与参数，再点「生成」。生成视频时可选帧数和帧率。生成中可查看进度或停止，生成后可预览、复制提示词或用相同参数再生成。退出应用前请保存或分享需要保留的结果。
+
+在「创作」页可选择最多 20 MiB 的 PNG、JPEG 或 WebP。点击「生成」时，图片才会上传到当前选中的 Colab 运行时。Qwen‑Image、FLUX.1 和 Z‑Image 会以原图为起点，按目标宽高比居中裁切。调低「重绘强度」会保留更多原图，调高则改动更多。Wan 2.2 5B 可用原图作为视频首帧，Wan 2.1 T2V 使用文字提示词。
 
 Colab 免费托管运行时若绕过 Notebook 界面，主要通过 ComfyUI 等网页界面生成内容，可能随时被终止。Google 说明，可通过付费方案并维持正计算单元余额解除这项免费层限制。所有 Colab 托管运行时均禁止制作深度伪造内容。生成涉及真实人物的图片或视频应先征得本人同意。[Google Colab 常见问题](https://research.google.com/colaboratory/faq.html#disallowed-activities)

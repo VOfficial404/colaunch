@@ -122,7 +122,7 @@ type Hardware struct {
 // Env is what a plugin's Deploy works with.
 type Env struct {
 	Values  map[string]string
-	Shell   *colab.Shell
+	Shell   colab.Transport
 	Spec    colab.Spec
 	Status  *agent.Status
 	Lang    string
@@ -134,12 +134,10 @@ type Env struct {
 	Log func(format string, args ...any)
 	// Phase tells the app what the plugin is doing now, to show.
 	Phase func(phase string)
-	// Stream starts command in a terminal of its own on the same runtime,
-	// as colab.Stream does, refreshing the runtime's credentials when it
-	// must. Waiting for a plugin to get ready talks to the agent through
-	// it, and opens another when one stops answering; what runs on the
-	// runtime is left be.
+	// Stream starts a live monitor command in its own SSH channel when available.
 	Stream func(ctx context.Context, command, ready string) (StreamConn, *bufio.Reader, error)
+	// Control retrieves the current shared connection for a one-shot probe.
+	Control func(ctx context.Context) (colab.Transport, error)
 	// ReadWaitStatus reads the detached installer's snapshot without a terminal.
 	ReadWaitStatus func(ctx context.Context, id, nonce string) (colab.WaitStatus, error)
 }
@@ -163,7 +161,7 @@ type Plugin interface {
 	// started serves.
 	Deploy(ctx context.Context, env *Env) (*Result, error)
 	// Stop stops it, leaving the runtime assigned.
-	Stop(ctx context.Context, sh *colab.Shell) error
+	Stop(ctx context.Context, sh colab.Transport) error
 }
 
 var (
@@ -384,13 +382,21 @@ func probeRequest(off int64, check string) (nonce, req string) {
 // the agent answers the one request piped to it and exits. The command
 // terminal is the one the plugin was started on, so it reads while a
 // dedicated terminal can't be opened.
-func shellProbe(ctx context.Context, sh *colab.Shell, id string, off int64, check string) (waitAnswer, error) {
+func shellProbe(ctx context.Context, sh colab.Transport, id string, off int64, check string) (waitAnswer, error) {
 	nonce, req := probeRequest(off, check)
 	command, _ := waitReadyCommand(id, waitLogChunk, rand.Text())
 	probeCtx, cancel := context.WithTimeout(ctx, waitProbeTimeout)
 	defer cancel()
 	head := "@@WR " + nonce + " "
-	out, code, err := sh.RunFramed(probeCtx, "printf '%s' "+ShellQuote(req)+" | "+command, head)
+	cmd := "printf '%s' " + ShellQuote(req) + " | " + command
+	var out string
+	var code int
+	var err error
+	if tty, ok := sh.(*colab.Shell); ok {
+		out, code, err = tty.RunFramed(probeCtx, cmd, head)
+	} else {
+		out, code, err = sh.Run(probeCtx, cmd)
+	}
 	if err == nil && code > 0 {
 		return waitAnswer{}, waitProbeExit(code)
 	}
@@ -486,6 +492,8 @@ func waitTransportError(err error) error {
 		return context.DeadlineExceeded
 	case errors.Is(err, context.Canceled):
 		return context.Canceled
+	case errors.Is(err, colab.ErrSSHClosed):
+		return colab.ErrSSHClosed
 	case errors.Is(err, colab.ErrTerminalClosed):
 		return colab.ErrTerminalClosed
 	case errors.Is(err, colab.ErrTerminalNotReady):
@@ -505,7 +513,7 @@ func waitTransportError(err error) error {
 // return to the file reader on the same runtime without relaunching.
 func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check, nonce string) error {
 	useFiles := nonce != "" && env.ReadWaitStatus != nil
-	if env.Stream == nil && !useFiles {
+	if env.Stream == nil && env.Shell == nil && !useFiles {
 		return errors.New("plugins: no terminal to wait for the plugin on")
 	}
 	start := time.Now()
@@ -537,7 +545,20 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 	if shell == nil {
 		lastShell = "unavailable"
 	}
-	viaShell, firstShellProbe := false, false
+	viaShell, firstShellProbe := env.Stream == nil, false
+	probeControl := func(ctx context.Context) (waitAnswer, error) {
+		if env.Control != nil {
+			var err error
+			shell, err = env.Control(ctx)
+			if err != nil {
+				return waitAnswer{}, err
+			}
+		}
+		if shell == nil {
+			return waitAnswer{}, colab.ErrTerminalClosed
+		}
+		return shellProbe(ctx, shell, id, off, check)
+	}
 	tryFile, fileActive := useFiles, false
 	var fileMisses int
 	var fileErr error
@@ -569,7 +590,7 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 				}
 				continue
 			} else {
-				if env.Stream == nil {
+				if env.Stream == nil && shell == nil && env.Control == nil {
 					return finish(fileErr)
 				}
 				logf("Runtime file status unavailable (%v); trying the terminal.", fileErr)
@@ -627,10 +648,10 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 		} else if firstShellProbe {
 			firstShellProbe = false
 			firstCtx, firstCancel := context.WithTimeout(probeCtx, waitShellCheck)
-			a, err = shellProbe(firstCtx, shell, id, off, check)
+			a, err = probeControl(firstCtx)
 			firstCancel()
 		} else if viaShell {
-			a, err = shellProbe(probeCtx, shell, id, off, check)
+			a, err = probeControl(probeCtx)
 		} else {
 			a, err = mon.probe(probeCtx, off, check)
 		}
@@ -654,7 +675,7 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 			if viaShell {
 				// A bad reply does not close the command terminal. Give the
 				// monitor another try before falling back to it again.
-				viaShell = false
+				viaShell = env.Stream == nil
 			} else {
 				mon.close()
 				mon = nil

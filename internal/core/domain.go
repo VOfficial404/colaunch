@@ -319,7 +319,7 @@ var removeDomain = func(ctx context.Context, d DomainConfig) error {
 }
 
 // domainShell is the session's shell, for the tunnel; tests replace it.
-var domainShell = func(m *Manager, ctx context.Context, s *Session, a *Account) (*colab.Shell, error) {
+var domainShell = func(m *Manager, ctx context.Context, s *Session, a *Account) (colab.Transport, error) {
 	return m.shellOf(ctx, s, a)
 }
 
@@ -391,7 +391,7 @@ func (m *Manager) StartDomainLink(s *Session, remote int, config string) error {
 		if d.Mode == DomainAPI {
 			token, host, err = publishDomain(ctx, d, remote)
 		}
-		var sh *colab.Shell
+		var sh colab.Transport
 		if err == nil {
 			sh, err = domainShell(m, ctx, s, a)
 		}
@@ -540,23 +540,4 @@ func (s *Session) dropDomainLinks() []string {
 	}
 	s.Domains = nil
 	return configs
-}
-
-// closeDomains stops tunnels on the runtime through the session's shell,
-// if it has one; a runtime given back stops them anyway.
-func (s *Session) closeDomains(configs []string) {
-	if len(configs) == 0 {
-		return
-	}
-	s.mu.Lock()
-	sh := s.shell
-	s.mu.Unlock()
-	if sh == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	for _, c := range configs {
-		stopDomain(ctx, sh, c)
-	}
 }

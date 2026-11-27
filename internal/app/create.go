@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
 	"colaunch/internal/comfy"
@@ -44,6 +45,11 @@ var (
 type createState struct {
 	inited  bool
 	session string
+	input   *createInput
+	// inputPicker is the form waiting for the single native picker or its read.
+	inputPicker *createInput
+	// pickInputFiles substitutes for the native dialog in UI tests.
+	pickInputFiles func(mygo.OpenDialogOptions) ([]string, error)
 	// forms are what the form says, by family.
 	forms map[string]*createForm
 	// picked is the family chosen for a session whose runtime didn't say.
@@ -271,9 +277,10 @@ func (a *App) createPage(c *ui.Context) {
 	}
 	if s == nil && len(sessions) > 0 {
 		s = sessions[0]
-		cr.session = s.ID
+		cr.selectSession(s.ID)
 	}
 	if s == nil {
+		cr.input = nil
 		pageScroll(c, i18n.T("nav.create"), nil, func() {
 			a.createEmpty(c)
 			if len(cr.items) > 0 {
@@ -350,9 +357,16 @@ func (a *App) sessionLine(c *ui.Context, s *core.Session) {
 
 func (a *App) sessionSelect(c *ui.Context, sessions []*core.Session, s *core.Session) {
 	names := make([]string, len(sessions))
-	chosen := ""
+	counts := make(map[string]int, len(sessions))
 	for i, x := range sessions {
 		names[i] = fmt.Sprintf("%s · %s", shortTitle(x), x.Spec)
+		counts[names[i]]++
+	}
+	chosen := ""
+	for i, x := range sessions {
+		if counts[names[i]] > 1 {
+			names[i] += " · " + x.ID
+		}
 		if x == s {
 			chosen = names[i]
 		}
@@ -360,7 +374,8 @@ func (a *App) sessionSelect(c *ui.Context, sessions []*core.Session, s *core.Ses
 	if ui.Select(c, &chosen, names).Label(i18n.T("create.session")).Changed() {
 		for i, n := range names {
 			if n == chosen {
-				a.create.session = sessions[i].ID
+				a.create.selectSession(sessions[i].ID)
+				return
 			}
 		}
 	}
@@ -371,6 +386,7 @@ func (a *App) createForm(c *ui.Context, s *core.Session) {
 	cr := &a.create
 	t := c.Theme()
 	f := a.sessionFamily(s)
+	input := cr.inputFor(s, f)
 	card(c, func() {
 		if f == nil {
 			a.familyPicker(c, s)
@@ -391,6 +407,9 @@ func (a *App) createForm(c *ui.Context, s *core.Session) {
 			ui.Field(c, i18n.T("create.negative"), func() {
 				ui.TextArea(c, &fm.negative).Placeholder(i18n.T("create.negative_ph")).Lines(2, 6)
 			})
+		}
+		if input != nil {
+			a.inputField(c, input, f.Kind, job != nil)
 		}
 		if len(f.Sizes) > 0 {
 			labels := make([]string, len(f.Sizes))
@@ -451,7 +470,8 @@ func (a *App) createForm(c *ui.Context, s *core.Session) {
 					ui.Text(c, i18n.T("create.connecting")).FontSize(13).TextColor(t.TextMuted)
 				})
 			}
-			b := labeledButton(c, iconSparkles, i18n.T("create.generate"), true).Disabled(addr == "")
+			opening := input != nil && cr.inputPicker == input
+			b := labeledButton(c, iconSparkles, i18n.T("create.generate"), true).Disabled(addr == "" || opening)
 			if isPhone(c) {
 				b.MinHeight(44)
 			}
@@ -459,7 +479,15 @@ func (a *App) createForm(c *ui.Context, s *core.Session) {
 				if strings.TrimSpace(fm.prompt) == "" {
 					fm.promptErr = i18n.T("create.need_prompt")
 				} else {
-					a.generate(s, f, fm.params(f))
+					params := fm.params(f)
+					var image *comfy.InputImage
+					if input != nil && input.image != nil {
+						image = input.image
+						if f.Kind == kindImage {
+							params.Denoise = input.denoise
+						}
+					}
+					a.generate(s, f, params, image)
 				}
 			}
 		}

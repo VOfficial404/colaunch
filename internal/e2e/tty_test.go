@@ -235,7 +235,7 @@ func TestTunnelOverTerminal(t *testing.T) {
 	}
 	m := tunnel.New(tty, r)
 	defer m.Close()
-	f, err := tunnel.Listen("127.0.0.1:0", ln.Addr().(*net.TCPAddr).Port, func() (*tunnel.Mux, error) { return m, nil })
+	f, err := tunnel.Listen("127.0.0.1:0", ln.Addr().(*net.TCPAddr).Port, m, tunnel.ForwardOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

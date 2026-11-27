@@ -39,9 +39,13 @@ func WaitReadyCommand(id string, limit int, nonce string) (command, marker strin
 
 // Install puts the agent on the runtime, in a folder only its owner
 // reads.
-func Install(ctx context.Context, sh *colab.Shell) error {
-	if _, _, err := sh.Run(ctx, "mkdir -p "+Home+" && chmod 700 "+Home); err != nil {
+func Install(ctx context.Context, sh colab.Transport) error {
+	out, code, err := sh.Run(ctx, "mkdir -p "+Home+" && chmod 700 "+Home)
+	if err != nil {
 		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("agent: install: %s", strings.TrimSpace(out))
 	}
 	return sh.Upload(ctx, Path, Script)
 }
@@ -50,7 +54,7 @@ func Install(ctx context.Context, sh *colab.Shell) error {
 func PluginDir(id string) string { return Home + "/plugins/" + id }
 
 // agentCmd runs the agent with args and returns its last line.
-func agentCmd(ctx context.Context, sh *colab.Shell, args ...string) (string, error) {
+func agentCmd(ctx context.Context, sh colab.Transport, args ...string) (string, error) {
 	cmd := "python3 " + Path
 	for _, a := range args {
 		cmd += " " + shellQuote(a)
@@ -69,7 +73,7 @@ func agentCmd(ctx context.Context, sh *colab.Shell, args ...string) (string, err
 // reads, in a folder of the plugin's made for it alone, and returns the
 // file's path. The plugin removes it once it's read; stopping the plugin
 // removes what's left.
-func PutPrivate(ctx context.Context, sh *colab.Shell, id, name string, data []byte) (string, error) {
+func PutPrivate(ctx context.Context, sh colab.Transport, id, name string, data []byte) (string, error) {
 	dir, err := agentCmd(ctx, sh, "private", id)
 	if err != nil {
 		return "", err
@@ -97,7 +101,7 @@ type Watchdog struct {
 
 // SetWatchdog writes the watchdog's limits and starts it when it isn't
 // running: it reads them anew every few seconds.
-func SetWatchdog(ctx context.Context, sh *colab.Shell, w Watchdog) error {
+func SetWatchdog(ctx context.Context, sh colab.Transport, w Watchdog) error {
 	b, _ := json.Marshal(w)
 	if err := sh.Upload(ctx, Home+"/watchdog.json", b); err != nil {
 		return err
@@ -136,7 +140,7 @@ type Notices struct {
 
 // SetNotices gives the watchdog the requests to make before it stops the
 // runtime, in a file only the runtime's owner reads; none removes it.
-func SetNotices(ctx context.Context, sh *colab.Shell, n Notices) error {
+func SetNotices(ctx context.Context, sh colab.Transport, n Notices) error {
 	if len(n.Requests) == 0 {
 		_, err := agentCmd(ctx, sh, "notices", "clear")
 		return err
@@ -203,7 +207,7 @@ func (s *Status) VRAMMB() int64 {
 }
 
 // GetStatus asks the agent for the runtime's state.
-func GetStatus(ctx context.Context, sh *colab.Shell) (*Status, error) {
+func GetStatus(ctx context.Context, sh colab.Transport) (*Status, error) {
 	out, code, err := sh.Run(ctx, "python3 "+Path+" status")
 	if err != nil {
 		return nil, err
@@ -219,14 +223,14 @@ func GetStatus(ctx context.Context, sh *colab.Shell) (*Status, error) {
 }
 
 // RunPlugin uploads a plugin's script and runs it in the background.
-func RunPlugin(ctx context.Context, sh *colab.Shell, id, script string) error {
+func RunPlugin(ctx context.Context, sh colab.Transport, id, script string) error {
 	return runPlugin(ctx, sh, id, script)
 }
 
 // RunMonitoredPlugin also starts a detached readiness monitor that publishes
 // PluginDir(id) + "/wait-" + nonce + ".json". Use a new nonce for each launch.
 // The check is a trusted shell command, as with WaitReadyCommand.
-func RunMonitoredPlugin(ctx context.Context, sh *colab.Shell, id, script, check, nonce string, timeout time.Duration) error {
+func RunMonitoredPlugin(ctx context.Context, sh colab.Transport, id, script, check, nonce string, timeout time.Duration) error {
 	if timeout <= 0 {
 		return fmt.Errorf("agent: readiness monitor needs a positive timeout")
 	}
@@ -235,7 +239,7 @@ func RunMonitoredPlugin(ctx context.Context, sh *colab.Shell, id, script, check,
 	return runPlugin(ctx, sh, id, script, nonce, encoded, seconds)
 }
 
-func runPlugin(ctx context.Context, sh *colab.Shell, id, script string, monitorArgs ...string) error {
+func runPlugin(ctx context.Context, sh colab.Transport, id, script string, monitorArgs ...string) error {
 	// The plugin's folder, only its owner's, before the script goes in.
 	if _, err := agentCmd(ctx, sh, "prepare", id); err != nil {
 		return err
@@ -265,19 +269,19 @@ func runPlugin(ctx context.Context, sh *colab.Shell, id, script string, monitorA
 }
 
 // StopPlugin stops a plugin.
-func StopPlugin(ctx context.Context, sh *colab.Shell, id string) error {
+func StopPlugin(ctx context.Context, sh colab.Transport, id string) error {
 	_, _, err := sh.Run(ctx, fmt.Sprintf("python3 %s stop %s", Path, id))
 	return err
 }
 
 // Logs returns the end of a plugin's log.
-func Logs(ctx context.Context, sh *colab.Shell, id string, lines int) (string, error) {
+func Logs(ctx context.Context, sh colab.Transport, id string, lines int) (string, error) {
 	out, _, err := sh.Run(ctx, fmt.Sprintf("python3 %s logs %s %d", Path, id, lines))
 	return out, err
 }
 
 // Unassign has the runtime give itself back.
-func Unassign(ctx context.Context, sh *colab.Shell, reason string) error {
+func Unassign(ctx context.Context, sh colab.Transport, reason string) error {
 	_, _, err := sh.Run(ctx, "python3 "+Path+" unassign "+reason)
 	return err
 }

@@ -42,6 +42,11 @@ var nodeTypes = map[string]struct {
 	"SamplerCustomAdvanced":   {nil, []string{"LATENT", "LATENT"}},
 	"FluxGuidance":            {[]string{"guidance"}, []string{"CONDITIONING"}},
 	"ConditioningZeroOut":     {nil, []string{"CONDITIONING"}},
+	"LoadImage":               {[]string{"image"}, []string{"IMAGE", "MASK"}},
+	"ImageScale":              {[]string{"upscale_method", "width", "height", "crop"}, []string{"IMAGE"}},
+	"VAEEncode":               {nil, []string{"LATENT"}},
+	"RepeatLatentBatch":       {[]string{"amount"}, []string{"LATENT"}},
+	"LatentFromBatch":         {[]string{"batch_index", "length"}, []string{"LATENT"}},
 	"EmptySD3LatentImage":     {[]string{"width", "height", "batch_size"}, []string{"LATENT"}},
 	"EmptyHunyuanLatentVideo": {[]string{"width", "height", "length", "batch_size"}, []string{"LATENT"}},
 	"Wan22ImageToVideoLatent": {[]string{"width", "height", "length", "batch_size"}, []string{"LATENT"}},
@@ -120,6 +125,10 @@ func (g *Graph) API() map[string]any {
 
 // Workflow builds the family's workflow for p, as ComfyUI's API takes it.
 func (f *Family) Workflow(m Models, p Params) *Graph {
+	return f.workflow(m, p, "")
+}
+
+func (f *Family) workflow(m Models, p Params, inputImage string) *Graph {
 	p = f.Fill(p)
 	if p.Seed < 0 {
 		p.Seed = rand.Int64N(1 << 50)
@@ -127,7 +136,13 @@ func (f *Family) Workflow(m Models, p Params) *Graph {
 	if m.LoRA != "" && m.LoRAStrength == 0 {
 		m.LoRAStrength = 1
 	}
-	return f.build(m, p)
+	switch {
+	case inputImage == "" || f.Kind == Video:
+		p.Denoise = 1
+	case p.Denoise == 0:
+		p.Denoise = DefaultDenoise
+	}
+	return f.build(m, p, inputImage)
 }
 
 // common parts of the workflows.
@@ -154,10 +169,29 @@ func (g *Graph) text(clip Link, text, title string) Link {
 	return g.add("CLIPTextEncode", title, map[string]any{"clip": clip, "text": text})
 }
 
+func (g *Graph) loadImage(filename string) Link {
+	return g.add("LoadImage", "", map[string]any{"image": filename})
+}
+
+func (g *Graph) imageLatent(vae Link, p Params, emptyClass, inputImage string) Link {
+	if inputImage == "" {
+		return g.add(emptyClass, "", map[string]any{"width": p.Width, "height": p.Height, "batch_size": p.Count})
+	}
+	// Fill the requested size by scaling proportionally and cropping the center.
+	pixels := g.add("ImageScale", "", map[string]any{
+		"image": g.loadImage(inputImage), "upscale_method": "lanczos", "width": p.Width, "height": p.Height, "crop": "center",
+	})
+	latent := g.add("VAEEncode", "", map[string]any{"pixels": pixels, "vae": vae})
+	if p.Count > 1 {
+		latent = g.add("RepeatLatentBatch", "", map[string]any{"samples": latent, "amount": p.Count})
+	}
+	return latent
+}
+
 func (g *Graph) sample(model, pos, neg, latent Link, p Params, sampler, scheduler string) Link {
 	return g.add("KSampler", "", map[string]any{
 		"model": model, "positive": pos, "negative": neg, "latent_image": latent,
-		"seed": p.Seed, "steps": p.Steps, "cfg": p.CFG, "sampler_name": sampler, "scheduler": scheduler, "denoise": 1.0,
+		"seed": p.Seed, "steps": p.Steps, "cfg": p.CFG, "sampler_name": sampler, "scheduler": scheduler, "denoise": p.Denoise,
 	})
 }
 
@@ -179,14 +213,14 @@ const (
 
 // Qwen-Image: its Qwen2.5-VL text encoder, AuraFlow's sampling with a
 // shift of 3.1, and SD3's empty latent.
-func buildQwenImage(m Models, p Params) *Graph {
+func buildQwenImage(m Models, p Params, inputImage string) *Graph {
 	g := &Graph{}
 	model := g.add("ModelSamplingAuraFlow", "", map[string]any{"model": g.unet(m), "shift": 3.1})
 	clip := g.clip(qwenTextEncoder, "qwen_image")
 	vae := g.vae(qwenVAE)
 	pos := g.text(clip, p.Prompt, positiveTitle)
 	neg := g.text(clip, p.Negative, negativeTitle)
-	latent := g.add("EmptySD3LatentImage", "", map[string]any{"width": p.Width, "height": p.Height, "batch_size": p.Count})
+	latent := g.imageLatent(vae, p, "EmptySD3LatentImage", inputImage)
 	g.saveImage(g.sample(model, pos, neg, latent, p, "euler", "simple"), vae, "qwen-image")
 	return g
 }
@@ -198,7 +232,7 @@ const (
 
 // Both 2.1 text-to-image templates use the same encoder and cache. The
 // sampler adjusts the empty latent to the model's 64 channels and 16x scale.
-func buildQwen21(m Models, p Params, prefix string, turbo bool) *Graph {
+func buildQwen21(m Models, p Params, inputImage, prefix string, turbo bool) *Graph {
 	g := &Graph{}
 	model := g.add("QwenImage21Cache", "", map[string]any{"model": g.unet(m), "device": "auto", "dtype": "default"})
 	clip := g.clip(qwen21TextEncoder, "qwen_image")
@@ -207,9 +241,9 @@ func buildQwen21(m Models, p Params, prefix string, turbo bool) *Graph {
 		"clip": clip, "prompt": p.Prompt, "negative_prompt": p.Negative, "resolution": 1024,
 	})
 	neg := Link{Node: pos.Node, Slot: 1}
-	latent := g.add("EmptyLatentImage", "", map[string]any{"width": p.Width, "height": p.Height, "batch_size": p.Count})
+	latent := g.imageLatent(vae, p, "EmptyLatentImage", inputImage)
 	var samples Link
-	if turbo && p.Steps == qwen21TurboSteps {
+	if inputImage == "" && turbo && p.Steps == qwen21TurboSteps {
 		sigmas := g.add("ManualSigmas", "", map[string]any{"sigmas": qwen21TurboSigmas})
 		noise := g.add("RandomNoise", "", map[string]any{"noise_seed": p.Seed})
 		guider := g.add("CFGGuider", "", map[string]any{"model": model, "positive": pos, "negative": neg, "cfg": p.CFG})
@@ -218,7 +252,7 @@ func buildQwen21(m Models, p Params, prefix string, turbo bool) *Graph {
 			"noise": noise, "guider": guider, "sampler": sampler, "sigmas": sigmas, "latent_image": latent,
 		})
 	} else {
-		// An explicitly different step count uses ComfyUI's simple schedule.
+		// KSampler uses the simple schedule and applies denoise to an input latent.
 		samples = g.sample(model, pos, neg, latent, p, "euler", "simple")
 	}
 	g.saveImage(samples, vae, prefix)
@@ -228,16 +262,16 @@ func buildQwen21(m Models, p Params, prefix string, turbo bool) *Graph {
 // FLUX.1 [dev] is guidance distilled: its guidance, FluxGuidance's, is
 // what CFG says, and the sampler's own CFG stays at 1, with no negative
 // prompt.
-func buildFluxDev(m Models, p Params) *Graph {
-	return buildFlux(m, p, true, "flux1-dev")
+func buildFluxDev(m Models, p Params, inputImage string) *Graph {
+	return buildFlux(m, p, inputImage, true, "flux1-dev")
 }
 
 // FLUX.1 [schnell] takes 4 steps and no guidance at all.
-func buildFluxSchnell(m Models, p Params) *Graph {
-	return buildFlux(m, p, false, "flux1-schnell")
+func buildFluxSchnell(m Models, p Params, inputImage string) *Graph {
+	return buildFlux(m, p, inputImage, false, "flux1-schnell")
 }
 
-func buildFlux(m Models, p Params, guidance bool, prefix string) *Graph {
+func buildFlux(m Models, p Params, inputImage string, guidance bool, prefix string) *Graph {
 	g := &Graph{}
 	model := g.unet(m)
 	g.Models = append(g.Models, clipL, t5xxlFP8)
@@ -248,7 +282,7 @@ func buildFlux(m Models, p Params, guidance bool, prefix string) *Graph {
 		pos = g.add("FluxGuidance", "", map[string]any{"conditioning": pos, "guidance": p.CFG})
 	}
 	neg := g.add("ConditioningZeroOut", "", map[string]any{"conditioning": pos})
-	latent := g.add("EmptySD3LatentImage", "", map[string]any{"width": p.Width, "height": p.Height, "batch_size": p.Count})
+	latent := g.imageLatent(vae, p, "EmptySD3LatentImage", inputImage)
 	p.CFG = 1
 	g.saveImage(g.sample(model, pos, neg, latent, p, "euler", "simple"), vae, prefix)
 	return g
@@ -257,7 +291,7 @@ func buildFlux(m Models, p Params, guidance bool, prefix string) *Graph {
 // Z-Image: Qwen3 4B as its text encoder, of the "lumina2" type, FLUX.1's
 // VAE, AuraFlow's sampling with a shift of 3. Turbo samples without CFG,
 // so without a negative prompt.
-func buildZImage(m Models, p Params) *Graph {
+func buildZImage(m Models, p Params, inputImage string) *Graph {
 	g := &Graph{}
 	model := g.add("ModelSamplingAuraFlow", "", map[string]any{"model": g.unet(m), "shift": 3.0})
 	clip := g.clip(qwen3TextEncoder, "lumina2")
@@ -269,14 +303,14 @@ func buildZImage(m Models, p Params) *Graph {
 	} else {
 		neg = g.add("ConditioningZeroOut", "", map[string]any{"conditioning": pos})
 	}
-	latent := g.add("EmptySD3LatentImage", "", map[string]any{"width": p.Width, "height": p.Height, "batch_size": p.Count})
+	latent := g.imageLatent(vae, p, "EmptySD3LatentImage", inputImage)
 	g.saveImage(g.sample(model, pos, neg, latent, p, "res_multistep", "simple"), vae, "z-image")
 	return g
 }
 
 // Wan 2.1: UMT5-XXL, SD3's sampling with a shift of 8, Hunyuan Video's
 // empty latent, and its 16 frames a second.
-func buildWan21(m Models, p Params) *Graph {
+func buildWan21(m Models, p Params, _ string) *Graph {
 	g := &Graph{}
 	model := g.add("ModelSamplingSD3", "", map[string]any{"model": g.unet(m), "shift": 8.0})
 	clip := g.clip(umt5FP8, "wan")
@@ -290,15 +324,29 @@ func buildWan21(m Models, p Params) *Graph {
 
 // Wan 2.2 5B: its own VAE, which the latent is made with, at 24 frames a
 // second.
-func buildWan22(m Models, p Params) *Graph {
+func buildWan22(m Models, p Params, inputImage string) *Graph {
 	g := &Graph{}
 	model := g.add("ModelSamplingSD3", "", map[string]any{"model": g.unet(m), "shift": 8.0})
 	clip := g.clip(umt5FP8, "wan")
 	vae := g.vae(wan22VAE)
 	pos := g.text(clip, p.Prompt, positiveTitle)
 	neg := g.text(clip, p.Negative, negativeTitle)
-	latent := g.add("Wan22ImageToVideoLatent", "", map[string]any{"vae": vae, "width": p.Width, "height": p.Height, "length": p.Frames, "batch_size": p.Count})
-	g.saveVideo(g.sample(model, pos, neg, latent, p, "uni_pc", "simple"), vae, p, "wan22")
+	inputs := map[string]any{"vae": vae, "width": p.Width, "height": p.Height, "length": p.Frames, "batch_size": p.Count}
+	if inputImage != "" {
+		// ComfyUI center-crops start_image and encodes it with a noise mask for the first frame.
+		inputs["start_image"] = g.loadImage(inputImage)
+	}
+	latent := g.add("Wan22ImageToVideoLatent", "", inputs)
+	samples := g.sample(model, pos, neg, latent, p, "uni_pc", "simple")
+	if inputImage != "" && p.Count > 1 {
+		// Decode each video separately: VAEDecode flattens batch and frame axes.
+		for i := range p.Count {
+			video := g.add("LatentFromBatch", "", map[string]any{"samples": samples, "batch_index": i, "length": 1})
+			g.saveVideo(video, vae, p, "wan22")
+		}
+	} else {
+		g.saveVideo(samples, vae, p, "wan22")
+	}
 	return g
 }
 

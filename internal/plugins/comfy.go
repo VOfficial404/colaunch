@@ -367,7 +367,7 @@ func (Comfy) readyCheck(port int) string {
 	return fmt.Sprintf("curl -sf --max-time 10 -o /dev/null http://127.0.0.1:%d/system_stats", port)
 }
 
-func (c Comfy) Stop(ctx context.Context, sh *colab.Shell) error {
+func (c Comfy) Stop(ctx context.Context, sh colab.Transport) error {
 	return stopPlugin(ctx, sh, c.ID())
 }
 

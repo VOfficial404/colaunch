@@ -24,9 +24,11 @@ type creation struct {
 	session string
 	family  *comfy.Family
 	params  comfy.Params
-	kind    comfy.Kind
-	mime    string
-	ext     string
+	// usedInput records that a result requires a separately selected image.
+	usedInput bool
+	kind      comfy.Kind
+	mime      string
+	ext       string
 	// index is its place among the outputs of its run.
 	index int
 	// data and bitmap are an image's; path is a video's file, or an
@@ -202,6 +204,8 @@ func (a *App) creationCard(c *ui.Context, s *core.Session, it *creation) {
 		meta := i18n.F("create.meta", p.Width, p.Height, p.Steps, p.CFG, p.Seed)
 		if it.kind == kindVideo {
 			meta += " · " + i18n.F("create.meta_video", p.Frames, p.FPS)
+		} else if it.usedInput {
+			meta += " · " + i18n.F("create.input_denoise_meta", p.Denoise)
 		}
 		if it.family != nil {
 			meta = familyName(it.family) + " · " + meta
@@ -209,6 +213,9 @@ func (a *App) creationCard(c *ui.Context, s *core.Session, it *creation) {
 		ui.Text(c, meta).FontSize(12).TextColor(t.TextMuted)
 		if p.Prompt != "" {
 			ui.Text(c, p.Prompt).FontSize(13).MaxLines(3).Ellipsis("…").Tooltip(p.Prompt)
+		}
+		if it.usedInput {
+			ui.Text(c, i18n.T("create.input_again")).FontSize(12).TextColor(t.TextMuted)
 		}
 		ui.Row(c).Gap(6).Wrap().AlignItems(ui.Center).Children(func() {
 			if touchButton(c, iconButton(c, iconDownload, i18n.T("save"))).Clicked() {
@@ -222,7 +229,7 @@ func (a *App) creationCard(c *ui.Context, s *core.Session, it *creation) {
 			if touchButton(c, iconButton(c, iconCopy, i18n.T("create.copy_prompt"))).Clicked() {
 				a.copyText(p.Prompt)
 			}
-			if touchButton(c, iconButton(c, iconRefresh, i18n.T("create.again"))).Clicked() {
+			if !it.usedInput && touchButton(c, iconButton(c, iconRefresh, i18n.T("create.again"))).Clicked() {
 				a.again(s, it)
 			}
 			ui.Spacer(c)
@@ -293,6 +300,9 @@ func (a *App) creationMedia(c *ui.Context, it *creation) {
 // again makes a result again with its settings, on the runtime that made
 // it while it runs, else on the one the form runs on.
 func (a *App) again(s *core.Session, it *creation) {
+	if it.usedInput {
+		return
+	}
 	cr := &a.create
 	target := s
 	for _, x := range a.comfySessions() {
@@ -312,10 +322,10 @@ func (a *App) again(s *core.Session, it *creation) {
 		a.toasts = append(a.toasts, ui.Toast{Title: i18n.T("create.busy"), Type: "info", Timeout: 2e9})
 		return
 	}
-	cr.session = target.ID
+	cr.selectSession(target.ID)
 	cr.load(it.family, it.params)
 	cr.form(it.family).fixed = true
-	a.generate(target, it.family, it.params)
+	a.generate(target, it.family, it.params, nil)
 }
 
 func mobileOS() bool { return runtime.GOOS == "android" || runtime.GOOS == "ios" }

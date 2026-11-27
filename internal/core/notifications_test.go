@@ -112,7 +112,7 @@ func TestSessionAlerts(t *testing.T) {
 		Reason string  `json:"reason"`
 		Time   float64 `json:"time"`
 	}{Reason: "idle"}
-	m.gone(s)
+	m.gone(s, s.gen)
 	if len(*got) != 1 || (*got)[0].event != notify.EventStopped || !strings.Contains((*got)[0].body, "stopped when idle") || !strings.Contains((*got)[0].title, "Qwen3-8B") {
 		t.Errorf("stopped as %v", *got)
 	}

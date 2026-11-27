@@ -5,9 +5,9 @@
 | Package | |
 |---|---|
 | `internal/google` | OAuth 2.0 for installed apps: PKCE, a loopback server on 127.0.0.1, pasting the address on phones; refreshing tokens; finding the Colab extension's client in editors |
-| `internal/colab` | Colab's API: runtimes (`colaboratory.googleapis.com/v1beta/runtimes`), compute units (`colab.pa.googleapis.com/v1/user-info`), a runtime's resources; and its terminal, `/colab/tty`, as a shell and as a raw stream |
+| `internal/colab` | Colab's API: runtimes (`colaboratory.googleapis.com/v1beta/runtimes`), compute units (`colab.pa.googleapis.com/v1/user-info`), a runtime's resources; and runtime transport over `/colab/ssh` or `/colab/tty` |
 | `internal/agent` | `agent.py`, which runs on the runtime, and the calls to it |
-| `internal/tunnel` | TCP over the agent's mux: listeners on 127.0.0.1 |
+| `internal/tunnel` | Local TCP listeners on 127.0.0.1 with SSH channels or the terminal mux |
 | `internal/hf` | a Hugging Face repository's GGUF files, their quantizations, and which fits |
 | `internal/plugins` | plugins: the llama one, and those of `plugin.json` |
 | `internal/core` | accounts, sessions (a runtime and its plugin), the limits on cost; no interface |
@@ -20,7 +20,7 @@
 1. The plugin checks its values (the llama plugin lists the repository's
    GGUF files) before anything costs money.
 2. `CreateRuntime` asks Colab for the machine and waits for the operation.
-3. Colaunch opens a terminal on the runtime, uploads `agent.py`, and asks
+3. Colaunch connects to the runtime, uploads `agent.py`, and asks
    it what the machine has. With a least GPU memory set, a runtime with
    less is given back and another asked for, up to the number of tries in
    the settings.
@@ -32,54 +32,55 @@
 If the plugin fails, the runtime is given back, unless the settings keep
 failed runtimes.
 
-## The terminal as a transport
+## Runtime transport
 
-Colab's proxy serves the runtime's Jupyter server and a terminal, both
-behind its token. Colaunch runs deployment commands over the terminal:
+Colaunch prefers Colab’s SSH-over-WebSocket endpoint at `/colab/ssh` on the
+runtime proxy. The upgrade sends the proxy token, the `colab-cli` client agent
+and `ssh-mode-proxy` query values, and an OpenSSH Ed25519 public key in
+`X-Colab-Ssh-Pubkey`. Colaunch generates one key per app process and keeps
+its private half in memory. The proxy’s TLS certificate authenticates
+Colab. Colaunch trusts the SSH host key presented through that proxy on
+first use and pins it in memory for the same runtime until the app exits.
+The WebSocket carries SSH bytes. Colaunch writes binary frames and accepts
+binary and text frames. [Official CLI SSH implementation](https://github.com/googlecolab/google-colab-cli/blob/7370b25f953a3f9a29f925a85607359f2f05d749/src/colab_cli/commands/ssh.py) · [SSH access and status codes](https://github.com/googlecolab/google-colab-cli/blob/7370b25f953a3f9a29f925a85607359f2f05d749/docs/06_ssh_access.md)
 
-- **Commands** run in a bash without readline, whose terminal echoes
-  nothing. Each prints markers around its output, typed with an empty pair
-  of quotes inside (`@@S""TART-1@@`) so that the terminal echoing them, if
-  it does, doesn't print what is looked for. A new terminal is ready once
-  it prints one marker of a random nonce of its own: what it printed
-  before, as an earlier terminal's output replayed, is dropped.
-- **Files** go up by switching the terminal to raw input, which has no
-  limit on the length of lines, and having `head -c` read exactly the
-  base64 sent.
-- **The tunnel** runs `agent.py mux` in a terminal of its own, raw: lines
-  of `O id port`, `D id base64`, `C id` carry many TCP connections both
-  ways.
-- **Waiting for a plugin** runs `agent.py wait-ready <id>` in a terminal of
-  its own, raw, as the tunnel does. Each request, `W nonce offset
-  base64(check)`, gets one line, `@@WR nonce crc32 payload@@`: `ready`, or
-  the plugin's liveness and a chunk of its log from offset. A line without
-  the request's nonce is ignored, one with a bad checksum or range is asked
-  again; a terminal that closes, doesn't answer or keeps answering badly is
-  replaced by another on the same runtime, reading on from the last offset
-  confirmed. The installer keeps running during reconnects. If the monitor
-  cannot connect within 15 seconds, Colaunch tries a read-only probe over
-  the existing control terminal. Each poll pipes one request to
-  `agent.py wait-ready`, which answers and exits. Colaunch can recover a
-  complete reply after a lost START or END marker by checking the nonce,
-  checksum, and log range. A stream's unique ready marker can follow
-  leftover output on the same line. The quoted marker in the echoed
-  command ends with a quote and cannot complete the handshake.
+One SSH connection as `root` carries independent channels for commands,
+stdin uploads, deployment monitoring and `direct-tcpip` to loopback ports.
+Commands run without a PTY and return combined output and the exit status.
+Uploads check their byte length before atomically renaming a private file
+in the destination directory. SSH keepalives detect a dropped connection.
+The next operation refreshes the proxy credentials and shares one replacement
+connection. Local listeners keep their addresses and new requests redial
+through it. A failed remote dial is reported in the session log. Forwarded
+traffic updates the watchdog’s activity file. Colab’s SSH connection limit
+depends on the plan, up to five. HTTP 429 surfaces the limit without opening
+a terminal. [Official CLI SSH access](https://github.com/googlecolab/google-colab-cli/blob/7370b25f953a3f9a29f925a85607359f2f05d749/docs/06_ssh_access.md)
 
-- **Monitoring without a terminal** reads a small status file through the
-  runtime's HTTPS Jupyter Contents API. The runtime agent starts a detached
-  status writer with the installer. Each launch has its own file with the
-  current readiness, process state and a bounded log tail. Colaunch checks
-  the launch identifier and freshness before using the snapshot. Terminal
-  recovery and file reads use the same runtime. The remote watchdog still
-  enforces the schedule, inactivity and cost limits.
+An HTTP 404 or an explicitly unsupported upgrade selects the `/colab/tty`
+fallback. Google describes the terminal as a tmux-wrapped bash and removed
+its `/colab/tty` transport in favor of `colab ssh`. Multiple attachments can
+share a pane, so replay or competing input can disrupt command markers and
+foreground processes. Colaunch uses one terminal attachment at a time. The
+fallback reads status snapshots or probes the control shell during deployment.
+For forwarding it detaches the control shell before opening the agent mux,
+and leaves the mux attached while it has clients. Shell-only operations may
+need to wait for those clients to disconnect. On reattachment Colaunch asks
+a surviving mux to quit before starting bash. The shared terminal can still
+replay output or lose markers across a handoff. [Official CLI execution and interactive history](https://github.com/googlecolab/google-colab-cli/blob/7370b25f953a3f9a29f925a85607359f2f05d749/docs/02_execution_and_interactive.md)
 
-- **Reading logs** can also use the Contents API. Colaunch tries
-  `/content/colaunch/…` as a URL-encoded Contents path, following the
-  official Colab VS Code client. On HTTP 404 it tries the plain relative
-  path `colaunch/…`, which works when `/content` is the server's root.
-  Manual log reads fall back to the shell. If deployment monitoring fails,
-  Colaunch tries to recover the last 24 lines before applying the usual
-  runtime release policy.
+The detached installer publishes readiness, liveness and a bounded log tail
+through the runtime’s HTTPS Jupyter Contents API. Colaunch validates the
+launch identifier and snapshot freshness. If snapshots fail, an SSH exec
+channel streams `agent.py wait-ready` with the existing ready marker and
+nonce, checksum and offset checks on each reply. The TTY fallback uses a
+one-shot probe through its control shell. Log reads try the Contents API
+under `/content/colaunch` and then `colaunch/` on HTTP 404, with shell reads
+as a fallback. The installer and watchdog keep running during reconnects.
+
+The local TLS wire test covers the SSH upgrade and channels. Whether runtimes
+created through `colaboratory.googleapis.com` expose `/colab/ssh` and allow
+`direct-tcpip` remains unverified live. The terminal fallback covers runtimes
+that report no SSH endpoint.
 
 ## The watchdog
 

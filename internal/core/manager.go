@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"colaunch/internal/colab"
@@ -15,6 +16,8 @@ import (
 	"colaunch/internal/hf"
 	"colaunch/internal/notify"
 	"colaunch/internal/plugins"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // DefaultOAuthClient is the OAuth client builds come with, set at build
@@ -32,8 +35,10 @@ func DefaultClient() google.Client {
 
 // Manager is the app's state.
 type Manager struct {
-	Dir     string
-	Secrets Secrets
+	Dir      string
+	Secrets  Secrets
+	sshKeyMu sync.Mutex
+	sshKey   ssh.Signer
 	// Post runs fn on the main thread, and draws the window again.
 	Post func(fn func())
 	// Peek runs fn on the main thread without drawing the window again,

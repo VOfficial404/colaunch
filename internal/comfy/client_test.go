@@ -26,7 +26,9 @@ type fakeComfy struct {
 	// hang is a run that never ends, to be interrupted.
 	hang bool
 	// outputs is the history's outputs.
-	outputs string
+	outputs    string
+	deployment string
+	upload     http.HandlerFunc
 
 	mu          sync.Mutex
 	prompt      map[string]any
@@ -44,8 +46,15 @@ func (fc *fakeComfy) server() *httptest.Server {
 		w.Write([]byte(`{"system":{"comfyui_version":"0.46.0"},"devices":[]}`))
 	})
 	mux.HandleFunc("/userdata/colaunch.json", func(w http.ResponseWriter, r *http.Request) {
+		if fc.deployment != "" {
+			w.Write([]byte(fc.deployment))
+			return
+		}
 		w.Write([]byte(`{"family":"wan21-t2v","unet":"colaunch/x__y/wan-Q4_K_M.gguf","lora":"colaunch/l__m/l.safetensors","lora_strength":0.8}`))
 	})
+	if fc.upload != nil {
+		mux.HandleFunc("/upload/image", fc.upload)
+	}
 	mux.HandleFunc("/prompt", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Prompt   map[string]any `json:"prompt"`

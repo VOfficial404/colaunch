@@ -60,10 +60,13 @@ func suggestComfy(msg, repo string) (string, bool) {
 
 // generate starts making what p asks for on s, in the background: it goes
 // on when the user leaves the page.
-func (a *App) generate(s *core.Session, f *comfy.Family, p comfy.Params) {
+func (a *App) generate(s *core.Session, f *comfy.Family, p comfy.Params, image *comfy.InputImage) {
 	cr := &a.create
 	cr.init()
 	if cr.jobs[s.ID] != nil {
+		return
+	}
+	if image != nil && (cr.session != s.ID || !f.SupportsInputImage()) {
 		return
 	}
 	addr := a.comfyAddr(s)
@@ -76,6 +79,7 @@ func (a *App) generate(s *core.Session, f *comfy.Family, p comfy.Params) {
 	delete(cr.errs, s.ID)
 	id := s.ID
 	dir, derr := cr.cacheDir()
+	usedInput := image != nil
 	go func() {
 		// Progress comes as fast as ComfyUI sends it; the window takes the
 		// latest at most every createFrame.
@@ -87,7 +91,7 @@ func (a *App) generate(s *core.Session, f *comfy.Family, p comfy.Params) {
 			job.prog, pending = latest, false
 			mu.Unlock()
 		}
-		outs, err := job.client.Generate(ctx, f, p, func(pr comfy.Progress) {
+		progress := func(pr comfy.Progress) {
 			mu.Lock()
 			latest = pr
 			later := !pending
@@ -96,7 +100,14 @@ func (a *App) generate(s *core.Session, f *comfy.Family, p comfy.Params) {
 			if later {
 				time.AfterFunc(createFrame, func() { a.m.Post(show) })
 			}
-		})
+		}
+		var outs []comfy.Output
+		var err error
+		if usedInput {
+			outs, err = job.client.GenerateWithImage(ctx, f, p, *image, progress)
+		} else {
+			outs, err = job.client.Generate(ctx, f, p, progress)
+		}
 		var made []*creation
 		for i, o := range outs {
 			it, perr := newCreation(o, i, dir, derr)
@@ -106,7 +117,7 @@ func (a *App) generate(s *core.Session, f *comfy.Family, p comfy.Params) {
 				}
 				continue
 			}
-			it.session, it.family, it.params = id, f, p
+			it.session, it.family, it.params, it.usedInput = id, f, p, usedInput
 			made = append(made, it)
 		}
 		canceled := ctx.Err() != nil
@@ -171,6 +182,7 @@ func (cr *createState) cacheDir() (string, error) {
 // cleanup closes the players and removes the files the page made, as the
 // app quits.
 func (cr *createState) cleanup() {
+	cr.input = nil
 	for _, it := range cr.items {
 		it.close()
 	}
