@@ -65,12 +65,21 @@ behind its token. Colaunch runs deployment commands over the terminal:
   leftover output on the same line. The quoted marker in the echoed
   command ends with a quote and cannot complete the handshake.
 
-- **Reading logs** can use the runtime's HTTPS Jupyter Contents API.
-  Colaunch requests only the plugin's log path and falls back to the shell
-  for manual log reads if the API cannot serve the file. After a monitoring
-  failure, it gives the file API up to three seconds to recover the last
-  24 lines before applying the normal runtime release policy. This depends
-  on the runtime exposing `/content` as the Contents root.
+- **Monitoring without a terminal** reads a small status file through the
+  runtime's HTTPS Jupyter Contents API. The runtime agent starts a detached
+  status writer with the installer. Each launch has its own file with the
+  current readiness, process state and a bounded log tail. Colaunch checks
+  the launch identifier and freshness before using the snapshot. Terminal
+  recovery and file reads use the same runtime. The remote watchdog still
+  enforces the schedule, inactivity and cost limits.
+
+- **Reading logs** can also use the Contents API. Colaunch tries
+  `/content/colaunch/…` as a URL-encoded Contents path, following the
+  official Colab VS Code client. On HTTP 404 it tries the plain relative
+  path `colaunch/…`, which works when `/content` is the server's root.
+  Manual log reads fall back to the shell. If deployment monitoring fails,
+  Colaunch tries to recover the last 24 lines before applying the usual
+  runtime release policy.
 
 ## The watchdog
 

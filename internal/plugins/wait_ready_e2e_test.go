@@ -119,7 +119,7 @@ while [ ! -f "$1/stop" ]; do sleep 0.1; done
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	if err := waitReady(ctx, env, id, 90*time.Minute, "test -f "+ShellQuote(home+"/ready")); err != nil {
+	if err := waitReady(ctx, env, id, 90*time.Minute, "test -f "+ShellQuote(home+"/ready"), ""); err != nil {
 		t.Fatalf("%v; logs %q", err, lastLines(strings.Join(logs, "\n"), 5))
 	}
 	want := []string{"start"}
@@ -237,7 +237,7 @@ func TestWaitReadyOverCommandTerminal(t *testing.T) {
 		},
 	}
 	start := time.Now()
-	if err := waitReady(ctx, env, id, 90*time.Minute, "test -f "+ShellQuote(home+"/ready")); err != nil {
+	if err := waitReady(ctx, env, id, 90*time.Minute, "test -f "+ShellQuote(home+"/ready"), ""); err != nil {
 		t.Fatalf("%v; logs %q", err, lastLines(strings.Join(logs, "\n"), 5))
 	}
 	var shown, notes []string
@@ -286,7 +286,7 @@ func TestWaitReadyNoFallbackOnDeadShell(t *testing.T) {
 			return nil, nil, errors.New("colab: terminal: 502")
 		},
 	}
-	err = waitReady(ctx, env, "p", 90*time.Minute, "false")
+	err = waitReady(ctx, env, "p", 90*time.Minute, "false", "")
 	if err == nil || !strings.Contains(err.Error(), "opening a terminal to wait on") || dials != waitMaxFails {
 		t.Fatalf("waitReady error = %v after %d dials", err, dials)
 	}

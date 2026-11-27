@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -63,6 +64,64 @@ func TestStopChecksThePID(t *testing.T) {
 	}
 	if st, err := os.ReadFile("/proc/" + itoa(rec.PID) + "/stat"); err == nil && !strings.Contains(string(st), ") Z ") {
 		t.Errorf("the plugin's process is still running: %s", st)
+	}
+}
+
+func TestMonitorKeepsReadyFreshUntilDeadline(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	dir := filepath.Join(home, "plugins", "p")
+	script := filepath.Join(t.TempDir(), "run.sh")
+	if err := os.WriteFile(script, []byte("touch ready\nexec sleep 60\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const nonce = "00000000000000000000000000000001"
+	check := base64.StdEncoding.EncodeToString([]byte("test -f " + shellQuote(filepath.Join(dir, "ready"))))
+	if out, err := agent(t, home, "run", "p", script, nonce, check, "14"); err != nil {
+		t.Fatal(out, err)
+	}
+	t.Cleanup(func() { agent(t, home, "stop", "p") })
+	expiry := time.Now().Add(14 * time.Second)
+	path := filepath.Join(dir, "wait-"+nonce+".json")
+	var snapshot struct {
+		State     string `json:"state"`
+		UpdatedAt int64  `json:"updated_at"`
+	}
+	read := func() {
+		b, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			snapshot.State = ""
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &snapshot); err != nil {
+			t.Fatalf("snapshot %s: %v", b, err)
+		}
+	}
+	var firstReady int64
+	for time.Now().Before(expiry) {
+		read()
+		if snapshot.State == "ready" {
+			if firstReady == 0 {
+				firstReady = snapshot.UpdatedAt
+			} else if snapshot.UpdatedAt > firstReady {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if snapshot.State != "ready" || snapshot.UpdatedAt <= firstReady {
+		t.Fatalf("ready was never refreshed: first timestamp %d, last snapshot %+v", firstReady, snapshot)
+	}
+	last := snapshot
+	time.Sleep(time.Until(expiry) + 250*time.Millisecond)
+	read()
+	if snapshot != last {
+		t.Fatalf("monitor expiry changed the snapshot: before %+v, after %+v", last, snapshot)
+	}
+	if out, err := agent(t, home, "running", "p"); err != nil || out != "yes" {
+		t.Fatalf("plugin after monitor expiry: %q, %v", out, err)
 	}
 }
 

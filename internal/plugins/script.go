@@ -2,6 +2,8 @@ package plugins
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -254,21 +256,16 @@ func (p *ScriptPlugin) Validate(ctx context.Context, values map[string]string, _
 
 func (p *ScriptPlugin) Deploy(ctx context.Context, env *Env) (*Result, error) {
 	env.Phase("start")
-	if err := runScript(ctx, env, p.ID(), p.scriptFor(env)); err != nil {
-		return nil, err
-	}
 	ready := p.Manifest.Ready
 	if ready == "" && len(p.Manifest.Ports) > 0 {
 		ready = fmt.Sprintf("(exec 3<>/dev/tcp/127.0.0.1/%d) 2>/dev/null", p.Manifest.Ports[0].Remote)
 	}
-	if ready != "" {
-		timeout := time.Duration(p.Manifest.Timeout * float64(time.Minute))
-		if timeout <= 0 {
-			timeout = 30 * time.Minute
-		}
-		if err := waitReady(ctx, env, p.ID(), timeout, ready); err != nil {
-			return nil, err
-		}
+	timeout := time.Duration(p.Manifest.Timeout * float64(time.Minute))
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	if err := deployScript(ctx, env, p.ID(), p.scriptFor(env), ready, timeout); err != nil {
+		return nil, err
 	}
 	env.Phase("ready")
 	ports := append([]Port(nil), p.Manifest.Ports...)
@@ -301,8 +298,20 @@ func (p *ScriptPlugin) Stop(ctx context.Context, sh *colab.Shell) error {
 	return stopPlugin(ctx, sh, p.ID())
 }
 
-func runScript(ctx context.Context, env *Env, id, script string) error {
-	return agent.RunPlugin(ctx, env.Shell, id, script)
+func deployScript(ctx context.Context, env *Env, id, script, check string, timeout time.Duration) error {
+	if check == "" || env.ReadWaitStatus == nil {
+		if err := agent.RunPlugin(ctx, env.Shell, id, script); err != nil || check == "" {
+			return err
+		}
+		return waitReady(ctx, env, id, timeout, check, "")
+	}
+	var launchID [16]byte
+	rand.Read(launchID[:])
+	nonce := hex.EncodeToString(launchID[:])
+	if err := agent.RunMonitoredPlugin(ctx, env.Shell, id, script, check, nonce, timeout); err != nil {
+		return err
+	}
+	return waitReady(ctx, env, id, timeout, check, nonce)
 }
 
 func stopPlugin(ctx context.Context, sh *colab.Shell, id string) error {

@@ -454,6 +454,9 @@ func (m *Manager) launch(ctx context.Context, s *Session, a *Account, p plugins.
 		Stream: func(ctx context.Context, command, ready string) (plugins.StreamConn, *bufio.Reader, error) {
 			return m.stream(ctx, s, a, command, ready)
 		},
+		ReadWaitStatus: func(ctx context.Context, plugin, nonce string) (colab.WaitStatus, error) {
+			return runtimeWaitStatus(ctx, s, a, plugin, nonce)
+		},
 	}
 	res, err := p.Deploy(ctx, env)
 	if err != nil {

@@ -5,9 +5,12 @@ package agent
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"colaunch/internal/colab"
 )
@@ -217,6 +220,22 @@ func GetStatus(ctx context.Context, sh *colab.Shell) (*Status, error) {
 
 // RunPlugin uploads a plugin's script and runs it in the background.
 func RunPlugin(ctx context.Context, sh *colab.Shell, id, script string) error {
+	return runPlugin(ctx, sh, id, script)
+}
+
+// RunMonitoredPlugin also starts a detached readiness monitor that publishes
+// PluginDir(id) + "/wait-" + nonce + ".json". Use a new nonce for each launch.
+// The check is a trusted shell command, as with WaitReadyCommand.
+func RunMonitoredPlugin(ctx context.Context, sh *colab.Shell, id, script, check, nonce string, timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("agent: readiness monitor needs a positive timeout")
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(check))
+	seconds := strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64)
+	return runPlugin(ctx, sh, id, script, nonce, encoded, seconds)
+}
+
+func runPlugin(ctx context.Context, sh *colab.Shell, id, script string, monitorArgs ...string) error {
 	// The plugin's folder, only its owner's, before the script goes in.
 	if _, err := agentCmd(ctx, sh, "prepare", id); err != nil {
 		return err
@@ -228,11 +247,18 @@ func RunPlugin(ctx context.Context, sh *colab.Shell, id, script string) error {
 	if err := sh.Upload(ctx, path, []byte(script)); err != nil {
 		return err
 	}
-	out, code, err := sh.Run(ctx, fmt.Sprintf("python3 %s run %s %s", Path, id, path))
+	cmd := fmt.Sprintf("python3 %s run %s %s", Path, id, path)
+	for _, arg := range monitorArgs {
+		cmd += " " + shellQuote(arg)
+	}
+	out, code, err := sh.Run(ctx, cmd)
 	if err != nil {
 		return err
 	}
 	if code != 0 {
+		if len(monitorArgs) > 0 {
+			return fmt.Errorf("agent: monitored run %s exited with status %d", id, code)
+		}
 		return fmt.Errorf("agent: run %s: %s", id, strings.TrimSpace(out))
 	}
 	return nil

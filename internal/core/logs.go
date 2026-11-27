@@ -104,6 +104,39 @@ func runtimeLog(ctx context.Context, s *Session, a *Account) (string, error) {
 	return a.Client.PluginLog(ctx, conn, s.Plugin)
 }
 
+// runtimeWaitStatus reads one launch's state over HTTPS, without starting
+// a terminal or assigning a runtime.
+func runtimeWaitStatus(ctx context.Context, s *Session, a *Account, plugin, nonce string) (colab.WaitStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	old, id, gen := s.conn, s.rid, s.gen
+	s.mu.Unlock()
+	if id == "" {
+		return colab.WaitStatus{}, errors.New("the session has no runtime")
+	}
+	if old != nil && (old.ExpireTime.IsZero() || time.Now().Before(old.ExpireTime)) {
+		status, err := a.Client.PluginWaitStatus(ctx, old, plugin, nonce)
+		if !errors.Is(err, colab.ErrRuntimeProxyAuth) {
+			return status, err
+		}
+	}
+	fresh, err := runtimeConnection(ctx, a.Client, id)
+	if err != nil {
+		return colab.WaitStatus{}, errors.New("deployment status: could not refresh the runtime connection")
+	}
+	s.mu.Lock()
+	if s.gen != gen || s.rid != id || ctx.Err() != nil {
+		s.mu.Unlock()
+		return colab.WaitStatus{}, errReplaced
+	}
+	if s.conn == old {
+		s.conn = fresh
+	}
+	s.mu.Unlock()
+	return a.Client.PluginWaitStatus(ctx, fresh, plugin, nonce)
+}
+
 // logTail bounds the displayed log and keeps the final redraw of each line.
 func logTail(log string, lines, maxBytes int) string {
 	log = strings.TrimRight(log, "\n")

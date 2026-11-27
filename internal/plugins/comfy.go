@@ -339,10 +339,7 @@ func (c Comfy) Deploy(ctx context.Context, env *Env) (*Result, error) {
 		fmt.Fprintf(&b, "export C_%s=%s\n", k, ShellQuote(vars[k]))
 	}
 	b.WriteString(comfyScript)
-	if err := runScript(ctx, env, c.ID(), b.String()); err != nil {
-		return nil, err
-	}
-	if err := waitReady(ctx, env, c.ID(), 90*time.Minute, c.readyCheck(ComfyPort)); err != nil {
+	if err := deployScript(ctx, env, c.ID(), b.String(), c.readyCheck(ComfyPort), 90*time.Minute); err != nil {
 		return nil, err
 	}
 	env.Phase("ready")

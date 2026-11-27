@@ -6,6 +6,8 @@
 #   agent.py watchdog          unassign the runtime when it's time, or idle
 #   agent.py status            print the runtime's state as JSON
 #   agent.py run ID SCRIPT     run a plugin's script in the background
+#   agent.py run ID SCRIPT NONCE CHECK SECONDS
+#                              also write readiness snapshots for this launch
 #   agent.py running ID        print yes, no, or unknown for a plugin
 #   agent.py wait-ready ID LIMIT MARKER
 #                              answer readiness requests over stdin and stdout
@@ -25,6 +27,7 @@
 
 import base64
 import json
+import math
 import os
 import re
 import shutil
@@ -415,17 +418,160 @@ def seal(path):
     print("sealed")
 
 
-def run(pid_name, script):
+MONITOR_NONCE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+MONITOR_SNAPSHOT = re.compile(r"wait-[a-f0-9]{32}\.json")
+MONITOR_INTERVAL = 4
+MONITOR_READY_INTERVAL = 8
+MONITOR_TAIL = 16 * 1024
+MONITOR_RETENTION = 24 * 60 * 60
+
+
+def monitor_check(encoded):
+    check = base64.b64decode(encoded, validate=True).decode()
+    if not check.strip() or "\0" in check:
+        raise ValueError
+    return check
+
+
+def check_ready(check, deadline):
+    """True or False for a completed check, None if it couldn't finish."""
+    limit = min(MONITOR_INTERVAL, deadline - time.monotonic())
+    if limit <= 0:
+        return None
+    try:
+        with subprocess.Popen(["bash", "-c", check], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True) as p:
+            try:
+                code = p.wait(timeout=max(0, min(limit, deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                return None
+            return code == 0 if code >= 0 else None
+    except OSError:
+        return None
+
+
+def prune_monitor_snapshots(directory, nonce):
+    cutoff = time.time() - MONITOR_RETENTION
+    current = "wait-" + nonce + ".json"
+    try:
+        files = os.scandir(directory)
+    except OSError:
+        return
+    with files:
+        for entry in files:
+            if entry.name == current or not MONITOR_SNAPSHOT.fullmatch(entry.name):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                    os.unlink(entry.path)
+            except OSError:
+                pass
+
+
+def run(pid_name, script, *monitor):
+    if monitor:
+        try:
+            nonce, encoded, seconds = monitor
+            seconds = float(seconds)
+            if not MONITOR_NONCE.fullmatch(nonce) or not math.isfinite(seconds) or seconds <= 0:
+                raise ValueError
+            check = monitor_check(encoded)
+        except ValueError:
+            sys.exit("invalid readiness monitor arguments")
+
     d = prepare(pid_name)
-    stop(pid_name, quiet=True)
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    log = os.fdopen(os.open(os.path.join(d, "log.txt"), flags, 0o600), "ab", buffering=0)
+    pid_file = os.path.join(d, "pid")
     env = dict(os.environ, COLAUNCH_HOME=HOME, COLAUNCH_PLUGIN_DIR=d,
                COLAUNCH_BUSY=BUSY, COLAUNCH_ACTIVITY=ACTIVITY)
-    p = subprocess.Popen(["bash", script], cwd=d, stdout=log, stderr=log,
-                         stdin=subprocess.DEVNULL, env=env, start_new_session=True)
-    write_pid(os.path.join(d, "pid"), p.pid)
+    stop(pid_name, quiet=True)
+    if monitor:
+        prune_monitor_snapshots(d, nonce)
+        # Require a completed failed check before accepting a success. A
+        # listener present before launch may still answer after it starts.
+        deadline = time.monotonic() + seconds
+        saw_unready = check_ready(check, deadline) is False
+        env["COLAUNCH_RUN_NONCE"] = nonce
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(os.path.join(d, "log.txt"), flags, 0o600), "ab", buffering=0) as log:
+        if monitor:
+            log_start = os.fstat(log.fileno()).st_size
+        p = subprocess.Popen(["bash", script], cwd=d, stdout=log, stderr=log,
+                             stdin=subprocess.DEVNULL, env=env, start_new_session=True)
+    if monitor:
+        rec = {"pid": p.pid, "start": proc_start(p.pid), "nonce": nonce}
+        write_json(pid_file, rec)
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "_monitor", pid_name,
+                          json.dumps(rec), encoded, str(deadline), str(log_start),
+                          "1" if saw_unready else "0"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    else:
+        write_pid(pid_file, p.pid)
     print(p.pid)
+
+
+def monitor_tail(path, log_start):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags), "rb") as log:
+        size = os.fstat(log.fileno()).st_size
+        start = max(log_start if log_start <= size else 0, size - MONITOR_TAIL)
+        log.seek(start)
+        data = log.read(size - start)
+    return start + len(data), start, base64.b64encode(data).decode("ascii")
+
+
+def monitor_run(pid_name, rec, check, deadline, log_start, saw_unready):
+    d = plugin_dir(pid_name)
+    pid_file = os.path.join(d, "pid")
+    log_file = os.path.join(d, "log.txt")
+    nonce = rec["nonce"]
+    path = os.path.join(d, "wait-" + nonce + ".json")
+    pid = rec["pid"]
+    tail = (log_start, log_start, "")
+
+    def owned():
+        return (read_pid(pid_file) == rec and rec["start"] is not None
+                and proc_start(pid) == rec["start"]
+                and proc_has(pid, "environ", "COLAUNCH_RUN_NONCE=" + nonce) is True)
+
+    def publish(ready=False):
+        nonlocal tail
+        if read_pid(pid_file) == rec:
+            try:
+                latest = monitor_tail(log_file, log_start)
+            except OSError:
+                latest = tail
+            if read_pid(pid_file) == rec:
+                tail = latest
+        still_owned = owned()
+        if time.monotonic() >= deadline:
+            return False  # Let the last snapshot age out.
+        if still_owned:
+            state = "ready" if ready else "starting"
+        else:
+            state = "stopped"
+        size, start, data = tail
+        write_json(path, {"nonce": nonce, "updated_at": int(time.time()), "state": state,
+                          "size": size, "from": start, "log": data})
+        return still_owned
+
+    if not publish():
+        return
+    while time.monotonic() < deadline:
+        started = time.monotonic()
+        result = check_ready(check, deadline) if owned() else None
+        ready = result is True and saw_unready
+        saw_unready = saw_unready or result is False
+        if not publish(ready):
+            return
+        interval = MONITOR_READY_INTERVAL if ready else MONITOR_INTERVAL
+        time.sleep(max(0, min(started + interval, deadline) - time.monotonic()))
 
 
 def running(pid_name):
@@ -716,7 +862,13 @@ def main():
     elif cmd == "status":
         status()
     elif cmd == "run":
-        run(sys.argv[2], sys.argv[3])
+        if len(sys.argv) not in (4, 7):
+            sys.exit("usage: agent.py run ID SCRIPT [NONCE CHECK SECONDS]")
+        run(*sys.argv[2:])
+    elif cmd == "_monitor":
+        name, rec, encoded, deadline, log_start, saw_unready = sys.argv[2:]
+        monitor_run(name, json.loads(rec), monitor_check(encoded), float(deadline),
+                    int(log_start), saw_unready == "1")
     elif cmd == "running":
         print(running(sys.argv[2]))
     elif cmd == "wait-ready":

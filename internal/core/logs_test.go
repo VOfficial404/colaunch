@@ -17,7 +17,7 @@ import (
 	"colaunch/internal/colab"
 )
 
-const testRuntimeLogPath = "colaunch/plugins/comfyui/log.txt"
+const testRuntimeLogPath = "/content/colaunch/plugins/comfyui/log.txt"
 
 func serveRuntimeLog(t *testing.T, w http.ResponseWriter, r *http.Request, log string) {
 	t.Helper()
@@ -40,7 +40,7 @@ func TestDeployFailureRecoversLogBeforeRelease(t *testing.T) {
 	}{
 		{name: "PTYs unavailable", err: monitorErr, wantRequests: "contents release", wantLog: "ComfyUI startup traceback"},
 		{name: "PTY diagnostics", err: errors.New("opening a terminal to wait on: terminal transport failed (monitor terminal: closed, command terminal: unavailable, elapsed: 30s)"), wantRequests: "contents release", wantLog: "ComfyUI startup traceback"},
-		{name: "relative path unavailable", err: monitorErr, missing: true, wantRequests: "contents release", wantLog: "relative log file unavailable (HTTP 404)"},
+		{name: "both paths unavailable", err: monitorErr, missing: true, wantRequests: "contents contents release", wantLog: "HTTP 404 at colaunch/plugins/comfyui/log.txt"},
 		{name: "unrelated plugin failure", err: errors.New("the plugin stopped: opening a terminal to wait on: diagnostic text"), wantRequests: "release"},
 		{name: "parent canceled during read", err: monitorErr, stopRead: true, wantRequests: "contents"},
 		{name: "kept runtime", err: monitorErr, keep: true, wantRequests: "contents", wantLog: "ComfyUI startup traceback"},

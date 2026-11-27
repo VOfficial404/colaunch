@@ -140,6 +140,8 @@ type Env struct {
 	// it, and opens another when one stops answering; what runs on the
 	// runtime is left be.
 	Stream func(ctx context.Context, command, ready string) (StreamConn, *bufio.Reader, error)
+	// ReadWaitStatus reads the detached installer's snapshot without a terminal.
+	ReadWaitStatus func(ctx context.Context, id, nonce string) (colab.WaitStatus, error)
 }
 
 // StreamConn is the input of a terminal Env.Stream opened.
@@ -498,14 +500,12 @@ func waitTransportError(err error) error {
 // waitReady polls check every few seconds until it's true, the plugin's
 // process ends, or ctx is done. Each poll shows the log's new lines.
 //
-// The polls go to the agent on a terminal of its own (waitMonitor). A bad
-// answer is asked again from the last confirmed log offset; a terminal
-// that closes, doesn't answer, or keeps answering badly is replaced by
-// another on the same runtime, the plugin left running. A monitor that
-// can't be opened in waitMonitorBudget gives way to a bounded probe on
-// the command terminal. If it answers, the polls continue over it.
-func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check string) error {
-	if env.Stream == nil {
+// Prefer the runtime's status file when a launch has one. If file reads
+// fail, continue with the monitor or control terminal. Terminal failures
+// return to the file reader on the same runtime without relaunching.
+func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, check, nonce string) error {
+	useFiles := nonce != "" && env.ReadWaitStatus != nil
+	if env.Stream == nil && !useFiles {
 		return errors.New("plugins: no terminal to wait for the plugin on")
 	}
 	start := time.Now()
@@ -538,8 +538,45 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 		lastShell = "unavailable"
 	}
 	viaShell, firstShellProbe := false, false
+	tryFile, fileActive := useFiles, false
+	var fileMisses int
+	var fileErr error
 	for probeCtx.Err() == nil {
-		if mon == nil && !viaShell {
+		var a waitAnswer
+		var err error
+		viaFile := false
+		if tryFile {
+			snap, readErr := env.ReadWaitStatus(probeCtx, id, nonce)
+			if probeCtx.Err() != nil {
+				break
+			}
+			if readErr == nil {
+				a, readErr = snapshotAnswer(snap, nonce, off, time.Now())
+			}
+			if fileErr = readErr; fileErr == nil {
+				if !fileActive {
+					logf("Reading deployment status through the runtime file API.")
+					if mon != nil {
+						mon.close()
+						mon = nil
+					}
+				}
+				viaFile, fileActive, fileMisses = true, true, 0
+			} else if fileMisses++; fileMisses < 2 {
+				select {
+				case <-probeCtx.Done():
+				case <-time.After(waitPollInterval):
+				}
+				continue
+			} else {
+				if env.Stream == nil {
+					return finish(fileErr)
+				}
+				logf("Runtime file status unavailable (%v); trying the terminal.", fileErr)
+				tryFile, fileActive = false, false
+			}
+		}
+		if !viaFile && mon == nil && !viaShell {
 			if fails > 1 {
 				select {
 				case <-probeCtx.Done():
@@ -577,16 +614,17 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 					continue
 				}
 				if fails++; fails >= waitMaxFails {
-					return finish(err)
+					return finish(errors.Join(err, fileErr))
 				}
+				tryFile, fileMisses = useFiles, 1
 				logf("✗ %v", err)
 				continue
 			}
 			mon, misses = m, 0
 		}
-		var a waitAnswer
-		var err error
-		if firstShellProbe {
+		if viaFile {
+			// The status snapshot already supplied the answer.
+		} else if firstShellProbe {
 			firstShellProbe = false
 			firstCtx, firstCancel := context.WithTimeout(probeCtx, waitShellCheck)
 			a, err = shellProbe(firstCtx, shell, id, off, check)
@@ -622,19 +660,22 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 				mon = nil
 			}
 			if fails++; fails >= waitMaxFails {
-				return finish(err)
+				return finish(errors.Join(err, fileErr))
 			}
+			tryFile, fileMisses = useFiles, 1
 			logf("The terminal stopped answering (%v); opening another to read on.", err)
 			continue
 		}
-		if viaShell {
-			lastShell = "answered"
-		} else {
-			lastMonitor = "answered"
+		if !viaFile {
+			if viaShell {
+				lastShell = "answered"
+			} else {
+				lastMonitor = "answered"
+			}
 		}
 		misses, fails = 0, 0
 		lastConnectionNote = ""
-		if a.ready {
+		if a.ready && !viaFile {
 			return nil
 		}
 		if a.from != off {
@@ -643,6 +684,9 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 		}
 		carry = showNew(env, carry, a.data, &recent)
 		off = a.from + int64(len(a.data))
+		if a.ready {
+			return nil
+		}
 		if !a.running {
 			if line := pluginLogLine(string(carry)); line != "" {
 				recent = append(recent, line)
@@ -665,6 +709,31 @@ func waitReady(ctx context.Context, env *Env, id string, timeout time.Duration, 
 	}
 	// Running out of time is the plugin's failure, not the terminals'.
 	return fmt.Errorf("the plugin didn't get ready in %s", timeout)
+}
+
+// snapshotAnswer aligns a file's tail with logs already read by either transport.
+func snapshotAnswer(s colab.WaitStatus, nonce string, off int64, now time.Time) (waitAnswer, error) {
+	age := now.Sub(time.Unix(s.UpdatedAt, 0))
+	if s.Nonce != nonce || age > 30*time.Second || age < -10*time.Second || s.From < 0 ||
+		s.Size < s.From || s.Size-s.From != int64(len(s.Log)) || len(s.Log) > waitLogChunk {
+		return waitAnswer{}, errors.New("stale or invalid deployment status snapshot")
+	}
+	a := waitAnswer{size: s.Size, from: s.From, data: s.Log}
+	switch s.State {
+	case "ready":
+		a.ready, a.running = true, true
+	case "starting":
+		a.running = true
+	case "stopped":
+	default:
+		return waitAnswer{}, errors.New("unknown deployment status snapshot state")
+	}
+	if off >= s.Size {
+		a.from, a.size, a.data = off, off, nil
+	} else if off > s.From {
+		a.from, a.data = off, s.Log[off-s.From:]
+	}
+	return a, nil
 }
 
 // showNew logs the whole lines of carry and chunk, the bytes the log

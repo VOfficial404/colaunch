@@ -2,6 +2,11 @@
 
 The release workflow takes a version's notes from its section here.
 
+## [0.1.15]
+
+- Continue monitoring a deployment through the runtime file API when terminal connections fail. The installer and its status writer stay on the assigned GPU. Colaunch checks both Contents paths for files under `/content`.
+- Preserve curl errors in the ComfyUI download log so that a failed transfer shows its cause.
+
 ## [0.1.14]
 
 - Preserve diagnostics from both the deployment monitor and the control terminal when neither can report a plugin’s status.

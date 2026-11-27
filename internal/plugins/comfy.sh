@@ -128,8 +128,12 @@ download() {
   [ "$token" = 1 ] && fetch=hf_curl
   local try
   for try in 1 2 3; do
-    $fetch -fL --retry 5 -C - -o "$dest" "$url" --progress-bar 2>&1 | tr '\r' '\n' | awk 'NR%40==0'
-    [ "${PIPESTATUS[0]}" = 0 ] && break
+    # Sample progress redraws without discarding curl's actual error lines.
+    $fetch -fL --retry 5 -C - -o "$dest" "$url" --progress-bar 2>&1 |
+      awk 'BEGIN { RS = "[\r\n]" } /^curl:|^Warning:/ || (NF && NR % 40 == 0) { print; fflush() }'
+    local result="${PIPESTATUS[0]}"
+    [ "$result" = 0 ] && break
+    echo "Download attempt $try failed for $4 (curl exit $result)"
     [ "$try" = 3 ] && { rm -f "$dest" "$dest.part" "$dest.sha256"; return 1; }
     echo "Retrying $4"
   done

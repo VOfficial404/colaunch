@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -224,7 +225,7 @@ func TestWaitReadyRecoversFromBrokenTerminals(t *testing.T) {
 	env.Log = func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	if err := waitReady(ctx, env, id, 90*time.Minute, check); err != nil {
+	if err := waitReady(ctx, env, id, 90*time.Minute, check, ""); err != nil {
 		t.Fatal(err)
 	}
 	var shown []string
@@ -260,6 +261,86 @@ func TestWaitReadyRecoversFromBrokenTerminals(t *testing.T) {
 	}
 }
 
+// The installer can continue even when neither terminal can be opened.
+func TestWaitReadyThroughRuntimeFiles(t *testing.T) {
+	const id, nonce = "comfyui", "bba301e9d64a4863b004010e9ac2ab86"
+	fastWait(t)
+	for _, state := range []string{"ready", "stopped"} {
+		t.Run(state, func(t *testing.T) {
+			path := "/content/colaunch/plugins/" + id + "/wait-" + nonce + ".json"
+			var reads atomic.Int32
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/api/contents/"+strings.TrimPrefix(path, "/content/") {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method != http.MethodGet || r.RequestURI != "/api/contents/%2Fcontent%2Fcolaunch%2Fplugins%2F"+id+"%2Fwait-"+nonce+".json" {
+					t.Errorf("unexpected status request: %q", r.RequestURI)
+					http.NotFound(w, r)
+					return
+				}
+				n := reads.Add(1)
+				if n <= 2 {
+					http.NotFound(w, r)
+					return
+				}
+				if n == 3 {
+					http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				text, phase := "download started\n", "starting"
+				if n > 4 {
+					phase = state
+					text += "download finished\n"
+					if state == "stopped" {
+						text += "fatal: plug-in exited"
+					}
+				}
+				snap, _ := json.Marshal(map[string]any{"nonce": nonce, "updated_at": time.Now().Unix(), "state": phase,
+					"size": len(text), "from": 0, "log": []byte(text)})
+				json.NewEncoder(w).Encode(map[string]string{"type": "file", "format": "text", "path": path, "content": string(snap)})
+			}))
+			t.Cleanup(srv.Close)
+			client := &colab.Client{HTTP: srv.Client()}
+			conn := &colab.Connection{URL: srv.URL, Token: "fake-proxy-token"}
+			var logs []string
+			dials := 0
+			env := &Env{
+				ReadWaitStatus: func(ctx context.Context, id, nonce string) (colab.WaitStatus, error) {
+					return client.PluginWaitStatus(ctx, conn, id, nonce)
+				},
+				Stream: func(context.Context, string, string) (StreamConn, *bufio.Reader, error) {
+					dials++
+					return nil, nil, colab.ErrTerminalNotReady
+				},
+				Log: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) },
+			}
+			err := waitReady(t.Context(), env, id, time.Second*5, "false", nonce)
+			if state == "ready" && err != nil || state == "stopped" && (err == nil || !strings.Contains(err.Error(), "fatal: plug-in exited")) {
+				t.Fatalf("%s snapshot: %v", state, err)
+			}
+			log := strings.Join(logs, "\n")
+			if dials == 0 || dials >= waitMaxFails || strings.Count(log, "download started") != 1 || strings.Count(log, "download finished") != 1 {
+				t.Fatalf("%d dials, logs %q", dials, log)
+			}
+		})
+	}
+}
+
+func TestSnapshotAnswerRejectsStaleOrWrongLaunch(t *testing.T) {
+	now := time.Now()
+	for _, status := range []colab.WaitStatus{
+		{Nonce: "previous", UpdatedAt: now.Unix(), State: "ready"},
+		{Nonce: "current", UpdatedAt: now.Add(-time.Minute).Unix(), State: "ready"},
+		{Nonce: "current", UpdatedAt: now.Add(time.Minute).Unix(), State: "ready"},
+		{Nonce: "current", UpdatedAt: now.Unix(), State: "stopped", Size: 8, From: 4, Log: []byte("short")},
+	} {
+		if _, err := snapshotAnswer(status, "current", 0, now); err == nil {
+			t.Errorf("accepted invalid snapshot %+v", status)
+		}
+	}
+}
+
 // fastWait makes requests time out, and the waits between polls and
 // terminals, short.
 func fastWait(t *testing.T) {
@@ -276,7 +357,7 @@ func TestWaitReadyKeepsStoppedTail(t *testing.T) {
 	env, _, _ := monitorEnv(t, id, script{replies: []reply{
 		logReply(3*waitLogChunk, 2*waitLogChunk, tail, "no"),
 	}})
-	if err := waitReady(t.Context(), env, id, 5*time.Second, check); err == nil || err.Error() != "the plugin stopped: fatal: dependency install failed" {
+	if err := waitReady(t.Context(), env, id, 5*time.Second, check, ""); err == nil || err.Error() != "the plugin stopped: fatal: dependency install failed" {
 		t.Fatalf("waitReady error = %v", err)
 	}
 }
@@ -295,7 +376,7 @@ func TestWaitReadyGivesUp(t *testing.T) {
 		scripts = append(scripts, bad)
 	}
 	env, reqs, conns := monitorEnv(t, id, scripts...)
-	err := waitReady(ctx, env, id, 90*time.Minute, check)
+	err := waitReady(ctx, env, id, 90*time.Minute, check, "")
 	var werr *WaitError
 	if !errors.As(err, &werr) || !errors.Is(err, errBadAnswer) ||
 		!strings.HasPrefix(err.Error(), "opening a terminal to wait on: invalid readiness probe response (") {
@@ -310,7 +391,7 @@ func TestWaitReadyGivesUp(t *testing.T) {
 		dials++
 		return nil, nil, fmt.Errorf("colab: terminal: %w", &colab.APIError{Status: 502, Message: "Bad Gateway"})
 	}
-	if err := waitReady(ctx, env, id, 90*time.Minute, check); !errors.As(err, &werr) ||
+	if err := waitReady(ctx, env, id, 90*time.Minute, check, ""); !errors.As(err, &werr) ||
 		!strings.HasPrefix(err.Error(), "opening a terminal to wait on: HTTP 502 (") || dials != waitMaxFails {
 		t.Fatalf("waitReady error = %v after %d dials", err, dials)
 	}
@@ -322,7 +403,7 @@ func TestWaitReadyTimesOut(t *testing.T) {
 	env, _, _ := monitorEnv(t, id, script{})
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if err := waitReady(ctx, env, id, 500*time.Millisecond, check); err == nil || err.Error() != "the plugin didn't get ready in 500ms" {
+	if err := waitReady(ctx, env, id, 500*time.Millisecond, check, ""); err == nil || err.Error() != "the plugin didn't get ready in 500ms" {
 		t.Fatalf("waitReady error = %v", err)
 	}
 }

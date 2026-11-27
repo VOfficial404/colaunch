@@ -258,10 +258,7 @@ func (l Llama) Deploy(ctx context.Context, env *Env) (*Result, error) {
 		fmt.Fprintf(&b, "export L_%s=%s\n", k, ShellQuote(vars[k]))
 	}
 	b.WriteString(llamaScript)
-	if err := runScript(ctx, env, l.ID(), b.String()); err != nil {
-		return nil, err
-	}
-	if err := waitReady(ctx, env, l.ID(), 90*time.Minute, l.readyCheck()); err != nil {
+	if err := deployScript(ctx, env, l.ID(), b.String(), l.readyCheck(), 90*time.Minute); err != nil {
 		return nil, err
 	}
 	env.Phase("ready")
